@@ -4,9 +4,7 @@ import torch, os
 from diffusers import StableDiffusionPipeline, LMSDiscreteScheduler
 app = Flask(__name__)
 
-access_token = "enter access token"
-
-
+access_token = "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"
     
 # this will substitute the default PNDM scheduler for K-LMS  
 lms = LMSDiscreteScheduler(
@@ -29,7 +27,10 @@ if cuda.is_available():
 @app.route("/stable_diffusion")
 def get_result():
     prompt = request.args.get("prompt")
-    prompt_path = os.path.join(root_dir(), "data",prompt.replace(" ", "_") + ".png")
+    prompt = prompt.replace(" ","-")
+    prompt = prompt.replace(".", "")
+    prompt = prompt.replace("/","")
+    prompt_path = os.path.join(root_dir(), "data", prompt + ".png")
     print(prompt, prompt_path)
     if cuda.is_available():
         with autocast("cuda"):
@@ -46,4 +47,4 @@ def root_dir():
     return os.path.abspath(os.path.dirname(__file__))
     
 if __name__=="__main__":
-    app.run(host="127.0.0.1", port="5555",debug = True)
+    app.run(host="0.0.0.0", port="5555", debug=True, ssl_context="adhoc")

@@ -59,3 +59,4 @@ wcwidth==0.2.5
 Werkzeug==2.2.2
 widgetsnbextension==4.0.2
 zipp==3.8.1
+pyopenssl==22.0.0
