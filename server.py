@@ -1,11 +1,11 @@
 from flask import Flask, request, send_file, make_response
-from torch import autocast, cuda
 import sys, getopt, os, threading, hashlib, torch
 from diffusers import StableDiffusionPipeline, LMSDiscreteScheduler
 app = Flask(__name__)
 
-access_token = "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"
+access_token = "enter access token"
 secret = ""
+use8g = False
 
 t = threading.BoundedSemaphore(2)
 
@@ -18,15 +18,26 @@ lms = LMSDiscreteScheduler(
     beta_schedule="scaled_linear"
 )
 
-pipe = StableDiffusionPipeline.from_pretrained(
-    "CompVis/stable-diffusion-v1-4", 
-    scheduler=lms,
-    use_auth_token=access_token
-)
+pipe = None
+if use8g == False:
+    pipe = StableDiffusionPipeline.from_pretrained(
+        "CompVis/stable-diffusion-v1-4", 
+        scheduler=lms,
+        use_auth_token=access_token
+    )
+else:
+    pipe = StableDiffusionPipeline.from_pretrained(
+        "CompVis/stable-diffusion-v1-4", 
+        revision="fp16", 
+        torch_dtype=torch.float16,
+        use_auth_token=access_token
+    )
 
-if cuda.is_available():
+if torch.cuda.is_available():
     print("using cuda")
     pipe = pipe.to("cuda:1")
+    if use8g:
+        pipe.enable_attention_slicing()
 
 @app.route("/setaccesstoken", methods=['POST'])
 def set_access_token():
@@ -68,9 +79,9 @@ def get_result():
 def get_image(prompt):
     try:
         with t:
-            if cuda.is_available():
-                with autocast("cuda"):
-                    image = pipe(prompt).images[0] 
+            if torch.cuda.is_available():
+                with torch.autocast("cuda"):
+                    image = pipe(prompt).images[0]
             else:
                 image = pipe(prompt).images[0]
             
@@ -100,7 +111,7 @@ def main(argv):
     p = "5555"
     
     try:
-      opts, args = getopt.getopt(argv,"",["secret","ip","port"])
+      opts, args = getopt.getopt(argv,"",["secret","ip","port","use8g"])
     except getopt.GetoptError:
         print("error reading options")
     for opt, arg in opts:

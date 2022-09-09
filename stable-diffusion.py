@@ -19,9 +19,8 @@ pipe = StableDiffusionPipeline.from_pretrained(
     use_auth_token=access_token
 ).to("cuda")
 
-
 def get_image():
-    file_name = os.path.join(root_dir(), "data", "astronaut_rides_horse.png")
+    file_name = os.path.join(root_dir(), "data", prompt.replace(" ", "-")+".png")
     
     with autocast("cuda"):
         image = pipe(prompt).images[0]  
