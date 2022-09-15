@@ -1,4 +1,4 @@
-import sys, getopt, os, threading, hashlib, torch, uuid
+import sys, getopt, os, threading, hashlib, torch
 from flask import Flask, request, send_file, make_response, jsonify
 from PIL.PngImagePlugin import PngInfo
 from PIL import Image
@@ -7,31 +7,59 @@ import sdhttp
 
 app = Flask(__name__)
 
-url = ""
-id = uuid.uuid4()
 access_token = "enter access token"
 model_path = ""
 lower_mem = False
 max_height = 512
 max_width = 512
-max_sessions = 1
+max_sessions = 2
 gpu = 0
-orch_url = ""
-orch_can_set_config = False
-
-max_batch_size = 32
 outputs = {}
 pipe = None
 lms = None
+t_id = uuid.uuid4()
+orch_uri = ""
 
 sdrequests = sdhttp.Sdrequests()
 t = threading.BoundedSemaphore(max_sessions)
 
-@app.before_request 
-def check_secret():
-    if sdrequests.match_request_secret(request) == False:
-        return make_response("secret does not match",500)
+def load_model():
+    try:
+        # this will substitute the default PNDM scheduler for K-LMS  
+        lms = LMSDiscreteScheduler(
+            beta_start=0.00085, 
+            beta_end=0.012, 
+            beta_schedule="scaled_linear"
+        )
+
+        pipe = None
+        model = "CompVis/stable-diffusion-v1-4" if model_path == "" else model_path
+        if low_mem == False:
+            pipe = StableDiffusionPipeline.from_pretrained(
+                model, 
+                scheduler=lms,
+                use_auth_token=access_token
+            )
+        else:
+            pipe = StableDiffusionPipeline.from_pretrained(
+                model, 
+                revision="fp16", 
+                torch_dtype=torch.float16,
+                scheduler=lms,
+                use_auth_token=access_token
+            )
         
+        if torch.cuda.is_available():
+            print("using cuda")
+            pipe = pipe.to("cuda:1")
+            if low_mem:
+                pipe.enable_attention_slicing()
+        
+    except:
+        print("could not load model, make sure access token or model_path is set")
+        pipe = None
+        lms = None
+
 @app.route("/accesstoken", methods=['GET','POST'])
 def access_token():
     if request.method == 'GET':
@@ -86,24 +114,21 @@ def max_image_size():
         else:
             return make_response("must input numeric height and width", 400)
 
-@app.route("/workerconfig", methods=['GET'])
-def send_worker_config():
-    config = worker_config()
+@app.route("/transcoderconfig", methods=['GET'])
+def transcoder_config():
+    config = {"maxheight": max_height, "maxwidth": max_width, "max_sessions": max_sessions, "gpu": gpu, "max_sessions": max_sessions, "lowermem": lower_mem}
     return jsonify(config), 200
 
-def worker_config():
-    config = {"maxheight": max_height, "maxwidth": max_width, "maxsessions": max_sessions, "gpu": gpu, "lowermem": lower_mem, "uri":url, "id":id}
-    return config
-
 @app.route("/txt2img", methods=['GET'])
-def txt2img():
+def get_result():
+    if sqrequests.match_request_secret(request) == False:
+        return make_response("secret does not match",500)
+        
     prompt = request.values.get("prompt")
     prompt = prompt.replace(" ","-")
     prompt = prompt.replace(".", "")
     prompt = prompt.replace("/","")
-    
-    app.logger.info("processing txt2img: " + prompt)
-    
+    print(prompt)
     guidance = prompt.values.get("guidance")
     iterations = prompt.values.get("iterations")
     height = prompt.values.get("height")
@@ -114,7 +139,7 @@ def txt2img():
     prompt_id = request.headers.get("prompt_id")
     
     #pipe returns [images] and if [nsfw_content_detected] 
-    images, nsfw, seeds = process_txt2img_prompt(prompt, guidance, iterations, height, width, batch_size, seed, seed_step)
+    images, nsfw, seeds = process_prompt(prompt, guidance, iterations, height, width, batch_size, seed, seed_step)
     
     grid = image_grid(images,1,batch_size)
     with io.BytesIO() as grid_with_data:
@@ -124,51 +149,10 @@ def txt2img():
         grid.save(grid_with_data, pnginfo=md)
         return send_file(grid_with_data, mimetype='image/png',download_name=prompt_id+".png")
     
-def load_model():
-    try:
-        pipe = None
-        lms = None
-        # this will substitute the default PNDM scheduler for K-LMS  
-        lms = LMSDiscreteScheduler(
-            beta_start=0.00085, 
-            beta_end=0.012, 
-            beta_schedule="scaled_linear"
-        )
-        
-        model = "CompVis/stable-diffusion-v1-4" if model_path == "" else model_path
-        if lower_mem == False:
-            pipe = StableDiffusionPipeline.from_pretrained(
-                model, 
-                scheduler=lms,
-                use_auth_token=access_token
-            )
-        else:
-            pipe = StableDiffusionPipeline.from_pretrained(
-                model, 
-                revision="fp16", 
-                torch_dtype=torch.float16,
-                scheduler=lms,
-                use_auth_token=access_token
-            )
-        
-        if torch.cuda.is_available():
-            app.logger.info("using cuda")
-            pipe = pipe.to("cuda:1")
-            if lower_mem:
-                app.logger.info("pipe set to use less gpu memory")
-                pipe.enable_attention_slicing()
-        
-    except:
-        app.logger.warning("could not load model, make sure access token or model_path is set")
-        pipe = None
-        lms = None
-        
-def process_txt2img_prompt(prompt='', guidance=7.5, iterations=50, height=512, width=512, batch_size=1, seed='', seed_step=0):
-    height = min(max_height, int(height))
-    width = min(max_width, int(width))
-    batch_size = min(max_batch_sie, int(batch_size))
-    
-    if prompt == ['']:
+def process_prompt(prompt='', guidance=7.5, iterations=50, height=512, width=512, batch_size=1, seed='', seed_step=0):
+    height = min(max_height, height)
+    width = min(max_width, width)
+    if prompt == '':
         return make_response("must input prompt",400)
     try:
         with t:
@@ -241,8 +225,8 @@ def torch_gc():
     torch.cuda.empty_cache()
     torch.cuda.ipc_collect()
     
-#def root_dir():
-#    return os.path.abspath(os.path.dirname(__file__))
+def root_dir():
+    return os.path.abspath(os.path.dirname(__file__))
     
 def main(argv):
     sdrequests.secret = "stablediffusion"
@@ -250,48 +234,33 @@ def main(argv):
     p = "5555"
     h = 512
     w = 512
-    orch_url = ""
     
     try:
-        opts, args = getopt.getopt(argv,"",["orchurl","secret","ip","port","lowermem","maxheight","maxwidth","modelpath","lowermem","orchcansetconfig","id"])
+        opts, args = getopt.getopt(argv,"",["orchurl","secret","ip","port","lowermem","maxheight","maxwidth","modelpath"])
         for opt, arg in opts:
             if opt == '--orchurl':
-                app.logger.info("orch url set")
-                orch_url = arg
+                orch_uri = arg
             elif opt == '--secret':
-                app.logger.info("secret set")
+                print("secret set")
                 sdrequests.secret = arg
             elif opt == "--ip":
-                app.logger.info("ip set")
+                print("ip set")
                 ip = arg
             elif opt == "--port":
-                app.logger.info("port set")
+                print("port set")
                 p = arg
             elif opt == "--maxheight":
-                app.logger.info("max height set")
+                print("max height set")
                 h = arg
             elif opt == "--maxwidth":
-                app.logger.info("max width set")
+                print("max width set")
                 w = arg
             elif opt == "--modelpath":
-                app.logger.info("model path set")
                 model_path = arg
             elif opt == "--lowermem":
-                app.logger.info("lower mem enabled")
                 lower_mem = True
-            elif opt == "--orchcansetconfig":
-                orch_can_set_config = True
-            elif opt == "--id":
-                id = arg
-            
-            url = "https://" + ip + ":" + p
-            if orch_url != "":
-                resp = sdrequests.post(orch_url+"/registerworker", json=worker_config())
-                if resp.status_code == 200:
-                    app.logger.info("worker registered to orchestrator: "+orch_url)
-                else:
-                    app.logger.warning("worker could not register to orchestrator")
         app.run(host=ip, port=p, ssl_context="adhoc", threaded=True)
+        
     except getopt.GetoptError:
         print("error reading options")
         

@@ -2,13 +2,14 @@ import requests
 from requests.models import Response
 
 class Sdrequests:
-    def __init__(self, t_uri="https://127.0.0.1:5555", secret="stablediffusion", verify_ssl=False):
-        self.t_uri = t_uri
+    def __init__(self, secret="stablediffusion", verify_ssl=False):
         self.secret = secret
         self.verify_ssl = verify_ssl
-        self.wrong_secret = requests.models.Response(status_code=500,_content = b'secret does not match')
+        self.wrong_secret = requests.models.Response()
+        self.wrong_secret.status_code = 500
+        self.wrong_secret._content = b'secret does not match'
         
-    def get(self, url="", params=None, data=None, headers={}):
+    def get(url="", params=None, data=None, headers={}):
         headers["Credentials"] = self.secret
         resp = requests.get(t_uri+url, params=params, data=data, headers=headers, verify=verify_ssl)
         
@@ -19,7 +20,7 @@ class Sdrequests:
         
         return resp
         
-    def post(self, url="", params=None, data=None, headers={}):
+    def post(url="", params=None, data=None, headers={}):
         headers["Credentials"] = self.secret
         resp = requests.post(t_uri+url, params=params, data=data, headers=headers, verify=verify_ssl)
         
@@ -27,7 +28,7 @@ class Sdrequests:
             return resp
         else:
             return self.wrong_secret
-    
+            
     def match_request_secret(req):
         if req.headers.get("Credentials") == self.secret:
             return True

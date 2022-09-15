@@ -3,14 +3,21 @@ from torch import autocast, cuda
 from urlparse import urlparse
 import torch, os, requests, io, uuid
 from diffusers import StableDiffusionPipeline, LMSDiscreteScheduler
-from .sdhttp import Sdrequests
+import sdhttp
+from setup_logger import logger
 
 app = Flask(__name__)
+sdrequests = sdhttp.Sdrequests()
 
-sdrequests = Sdrequests()
+workers = {}
 
-@app.route("/stable_diffusion")
-def get_result():
+@app.before_request 
+def check_secret():
+    if sdrequests.match_request_secret(request) == False:
+        return make_response("secret does not match",500)
+
+@app.route("/sd/txt2img")
+def process_txt2img():
     prompt = request.values.get("prompt")
     if (prompt == None or prompt == ""):
         return make_response("Need to input prompt", 400)
@@ -27,7 +34,7 @@ def get_result():
         if iterations.isnumeric() == False:
             return make_response("Need to input numeric iterations setting")
     else:
-        iterations = 10
+        iterations = 50
     
     height = request.values.get("height")
     if height != None:
@@ -49,56 +56,58 @@ def get_result():
     
     seed = request.values.get("seed")
     if seed == None:
-        seed = -1
+        seed = ''
     
     req = request.full_path
-    resp = sdrequests.get("/stable_diffusion",headers={"prompt_id":uuid.uuid4()},params={"prompt":prompt,"guidance":guidance,"iterations":iterations,"seed":seed})
+    resp = sdrequests.get("/txt2img",headers={"prompt_id":uuid.uuid4()},params={"prompt":prompt,"guidance":guidance,"iterations":iterations,"height":height,"width":width,"seed":seed})
     
-    if sdrequests.match_response_secret(resp):
-        print("secret does not match from transcoder")
-        return make_response("secret does not match",400)
-        
-    if resp.status_code == 200 :
-        print("image received from transcoder")
+    if resp.status_code == 200:
+        app.logger.info("image received from worker")
         return send_file(resp.content, mimetype='image/png')
     elif resp.status_code == 503:
-        print("transcoder busy")
+        app.logger.info("worker busy")
         return make_response(resp.content, resp.status_code)
     else:
-        print("error from transcoder")
+        app.logger.info("error from worker")
         return make_response("could not process prompt", 500)
 
-@app.route("/settranscoderconfig")
-def set_transcoder_config():
-    t_uri = request.values.get("t_uri")
+@app.route("/registerworker", methods=['POST'])
+def register_worker():
+    w_config = request.get_json()
+    workers[w_config["id"]] = w_config}
+
+@app.route("/setworkerconfig")
+def set_worker_config():
+    w_url = request.values.get("url")
     token = request.values.get("token")
     sessions = request.values.get("sessions")
     gpu = request.values.get("gpu")
     mh = request.values.get("maxheight")
     mw = request.values.get("maxwidth")
+    w_id = request.values.get("id")
     
-    if t_uri != None:
-        if "https://" in t_uri:
+    if w_uri != None:
+        if "https://" in w_uri:
             try:
                 result = urlparse(x)
-                sdrequests.t_uri = t_uri
+                sdrequests.w_uri = w_uri
             except:
-                return make_response("t_uri provided is not a url", 400)
+                return make_response("w_uri provided is not a url", 400)
         else:
-            return make_response("t_uri must include https://", 400)
+            return make_response("w_uri must include https://", 400)
     
     if token != None:
-        resp = sdrequests.post("/setaccesstoken", data={'token':token})
+        resp = sdrequests.post("/accesstoken", data={'token':token})
         if resp.status_code != 200:
                 return make_response(resp.content, resp.status_code)
     
     if sessions != None:
-        resp = sdrequests.post("/setmaxsessions", data={'sessions':sessions})
+        resp = sdrequests.post("/maxsessions", data={'sessions':sessions})
         if resp.status_code != 200:
             return make_response(resp.content, resp.status_code)
     
     if gpu != None:
-        resp = sdrequests.post("/setgpu", data={'gpu':gpu})
+        resp = sdrequests.post("/gpu", data={'gpu':gpu})
         if resp.status_code != 200:
             return make_response(resp.content, resp.status_code)
     
@@ -109,13 +118,12 @@ def set_transcoder_config():
             h = mh
         if mw != None:
             w = mw
+        resp = sdrequests.post("/maximagesize", data={"maxheight":h,"maxwidth":w})
         
-        resp = sdrequests.post("/setmaximagesize", data={"maxheight":h,"maxwidth":w})
-        
-    return make_response("transcoder config updated",200)   
+    return make_response("worker config updated",200)
 
-def root_dir():
-    return os.path.abspath(os.path.dirname(__file__))
+#def root_dir():
+#    return os.path.abspath(os.path.dirname(__file__))
 
 def main(argv):
     secret = "stablediffusion"
@@ -125,16 +133,16 @@ def main(argv):
     try:
       opts, args = getopt.getopt(argv,"",["secret","ip","port","noselfsignedcert"])
     except getopt.GetoptError:
-        print("error reading options")
+        app.logger.info("error reading options")
     for opt, arg in opts:
         if opt == '--secret':
-            print("secret set")
+            app.logger.info("secret set")
             sdrequests.secret = arg
         elif opt == "--ip":
-            print("ip set")
+            app.logger.info("ip set")
             ip = arg
         elif opt == "--port":
-            print("port set")
+            app.logger.info("port set")
             p = arg
         elif: opt == "--noselfsignedcert"
             sdrequests.verify_ssl = True
