@@ -9,9 +9,9 @@ class Sdrequests:
         self.wrong_secret.status_code = 500
         self.wrong_secret._content = b'secret does not match'
         
-    def get(url="", params=None, data=None, headers={}):
-        headers["Credentials"] = self.secret
-        resp = requests.get(t_uri+url, params=params, data=data, headers=headers, verify=verify_ssl)
+    def get(self, url="", p=None, d=None, h={}):
+        h["Credentials"] = self.secret
+        resp = requests.get(t_uri+url, params=p, data=d, headers=h, verify=verify_ssl)
         
         if match_response_secret(resp):
             return resp
@@ -20,22 +20,22 @@ class Sdrequests:
         
         return resp
         
-    def post(url="", params=None, data=None, headers={}):
-        headers["Credentials"] = self.secret
-        resp = requests.post(t_uri+url, params=params, data=data, headers=headers, verify=verify_ssl)
+    def post(self, url="", p=None, d=None, h={}):
+        h["Credentials"] = self.secret
+        resp = requests.post(t_uri+url, params=p, data=d, headers=h, verify=verify_ssl)
         
         if match_response_secret(resp):
             return resp
         else:
             return self.wrong_secret
             
-    def match_request_secret(req):
+    def match_request_secret(self, req):
         if req.headers.get("Credentials") == self.secret:
             return True
         else:
             return False
     
-    def match_response_secret(resp):
+    def match_response_secret(self, resp):
         if resp.headers["Credentials"] == self.secret:
             return True
         else:
