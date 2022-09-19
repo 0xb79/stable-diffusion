@@ -255,7 +255,7 @@ def main(args):
     sdrequests.secret = args.secret
     gpu = args.gpu
     lower_mem = args.lowermem
-    model_path = args.model_path
+    model_path = args.modelpath
     max_height = args.maxheight
     max_width = args.maxwidth
     orch_can_set_config = args.orchcansetconfig
