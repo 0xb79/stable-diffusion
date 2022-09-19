@@ -10,7 +10,7 @@ class Sdrequests:
         self.wrong_secret._content = b'secret does not match'
         
     def get(self, url="", params=None, data=None, headers={}):
-        h["Credentials"] = self.secret
+        headers["Credentials"] = self.secret
         resp = requests.get(t_uri+url, params=p, data=d, headers=h, verify=verify_ssl)
         
         if match_response_secret(resp):
@@ -21,7 +21,7 @@ class Sdrequests:
         return resp
         
     def post(self, url="", params=None, data=None, headers={}, json={}):
-        h["Credentials"] = self.secret
+        headers["Credentials"] = self.secret
         resp = requests.post(t_uri+url, params=params, data=data, headers=headers, json=json, verify=verify_ssl)
         
         if match_response_secret(resp):
