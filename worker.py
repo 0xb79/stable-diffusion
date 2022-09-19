@@ -265,6 +265,9 @@ def main(args):
     #register worker with O if specified
     if args.orchurl != "":
         orch_url = args.orchurl
+        if not "https://" in args.orch_url:
+            orch_url = "https://"+orch_url
+        
         resp = sdrequests.post(orch_url+"/registerworker", json=worker_config())
         if resp.status_code == 200:
             app.logger.info("worker registered to orchestrator: "+orch_url)
