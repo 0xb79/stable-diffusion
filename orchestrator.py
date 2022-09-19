@@ -77,7 +77,7 @@ def process_txt2img():
         
     req = request.full_path
     wkr = select_worker('load')
-    resp = sdrequests.get(wkr['url']+"/txt2img",h={"prompt_id":uuid.uuid4()},p={"prompt":prompt,"guidance":guidance,"iterations":iterations,"height":height,"width":width,"seed":seed, "seed_step":seed_step})
+    resp = sdrequests.get(wkr['url']+"/txt2img",headers={"prompt_id":uuid.uuid4()},params={"prompt":prompt,"guidance":guidance,"iterations":iterations,"height":height,"width":width,"seed":seed, "seed_step":seed_step})
     
     if resp.status_code == 200:
         app.logger.info("image received from worker")
@@ -126,17 +126,17 @@ def set_worker_config():
     w_url = workers[w_id]["url"]
     
     if token != None:
-        resp = sdrequests.post(w_url+"/accesstoken", d={'token':token})
+        resp = sdrequests.post(w_url+"/accesstoken", data={'token':token})
         if resp.status_code != 200:
                 return make_response(resp.content, resp.status_code)
     
     if sessions != None:
-        resp = sdrequests.post(w_url+"/maxsessions", d={'sessions':sessions})
+        resp = sdrequests.post(w_url+"/maxsessions", data={'sessions':sessions})
         if resp.status_code != 200:
             return make_response(resp.content, resp.status_code)
     
     if gpu != None:
-        resp = sdrequests.post(w_url+"/gpu", d={'gpu':gpu})
+        resp = sdrequests.post(w_url+"/gpu", data={'gpu':gpu})
         if resp.status_code != 200:
             return make_response(resp.content, resp.status_code)
     
@@ -147,7 +147,7 @@ def set_worker_config():
             h = mh
         if mw != None:
             w = mw
-        resp = sdrequests.post(w_url+"/maximagesize", d={"maxheight":h,"maxwidth":w})
+        resp = sdrequests.post(w_url+"/maximagesize", data={"maxheight":h,"maxwidth":w})
         
     return make_response("worker config updated",200)
 
