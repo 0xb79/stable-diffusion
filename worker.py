@@ -1,31 +1,22 @@
-import sys, getopt, os, threading, hashlib, torch, uuid, argparse
+import sys, getopt, os, threading, hashlib, torch, uuid, argparse, json, logging
 from flask import Flask, request, send_file, make_response, jsonify
 from PIL.PngImagePlugin import PngInfo
 from PIL import Image
 from diffusers import StableDiffusionPipeline, LMSDiscreteScheduler
-import sdhttp, logger
+import sdhttp
+
+logging.basicConfig(level=logging.INFO)
 
 app = Flask(__name__)
 
-url = ""
-id = uuid.uuid4()
-access_token = "enter access token"
-model_path = ""
-lower_mem = False
-max_height = 512
-max_width = 512
-max_sessions = 1
-gpu = 0
-orch_url = ""
-orch_can_set_config = False
+config = {"url":"","id":uuid.uuid4(),"accesstoken":"","modelpath":"","lowermem":False,"maxheight":512,"maxwidth":512,"maxsessions":1,"gpu":0,"orchurl":"","orchcansetconfig":False, "maxbatchsize":32}
 
-max_batch_size = 32
 outputs = {}
 pipe = None
 lms = None
 
 sdrequests = sdhttp.Sdrequests()
-t = threading.BoundedSemaphore(max_sessions)
+t = threading.BoundedSemaphore(1)
 
 @app.before_request 
 def check_secret():
@@ -35,11 +26,11 @@ def check_secret():
 @app.route("/accesstoken", methods=['GET','POST'])
 def access_token():
     if request.method == 'GET':
-        return jsonify({"access_token":access_token}), 200
+        return jsonify({"accesstoken":config["accesstoken"]}), 200
     if request.method == 'POST':
         token = request.values.get("token")
         if token[:2] == "hf" and len(token) == 37:
-            access_token = token
+            config["accesstoken"] = token
             load_model()
             return make_response("Ok", 200)
         else:
@@ -48,11 +39,11 @@ def access_token():
 @app.route("/maxsessions", methods=['GET','POST'])
 def max_sessions():
     if request.method == 'GET':
-        return jsonify({"max_sessions":max_sessions}), 200
+        return jsonify({"maxsessions":config["maxsessions"]}), 200
     if request.method == 'POST':
         sessions = request.values.get("sessions")
         if sessions.isnumeric():
-            max_sessions = int(sessions)
+            config["maxsessions"] = int(sessions)
             t = threading.BoundedSemaphore(int(sessions))
             return make_response("Ok", 200)
         else:
@@ -61,11 +52,11 @@ def max_sessions():
 @app.route("/gpu", methods=['GET','POST'])
 def gpu():
     if request.method == 'GET':
-        return jsonify({"gpu":gpu}), 200
+        return jsonify({"gpu":config["gpu"]}), 200
     if request.method == 'POST':
         gpu = request.values.get("gpu")
         if gpu.isnumeric():
-            gpu = int(gpu)
+            config["gpu"] = int(gpu)
             pipe = pipe.to("cuda:"+gpu)
             return make_response("Ok", 200)
         else:
@@ -74,14 +65,14 @@ def gpu():
 @app.route("/maximagesize", methods=['GET','POST'])
 def max_image_size():
     if request.method == 'GET':
-        return jsonify({"max_height":max_height,"max_width":max_width})
-    if request.meoth == 'POST':
+        return jsonify({"maxheight":config["maxheight"],"maxwidth":config["maxwidth"]})
+    if request.method == 'POST':
         h = request.values.get("maxheight")
         w = request.values.get("maxwidth")
         
         if h.isnumeric() and w.isnumeric():
-            max_height = h
-            max_width = w
+            config["maxheight"] = h
+            config["maxwidth"] = w
             return make_response("max image size set", 200)
         else:
             return make_response("must input numeric height and width", 400)
@@ -96,26 +87,26 @@ def send_worker_config():
     return jsonify(config), 200
 
 def worker_config():
-    config = {"maxheight": max_height, "maxwidth": max_width, "maxsessions": max_sessions, "gpu": gpu, "lowermem": lower_mem, "url":url, "id":id}
     return config
 
 @app.route("/txt2img", methods=['GET'])
 def txt2img():
     prompt = request.values.get("prompt")
-    prompt = prompt.replace(" ","-")
-    prompt = prompt.replace(".", "")
-    prompt = prompt.replace("/","")
+    if prompt == "":
+        return make_response("prompt must be specified",400)
     
     app.logger.info("processing txt2img: " + prompt)
     
-    guidance = prompt.values.get("guidance")
-    iterations = prompt.values.get("iterations")
-    height = prompt.values.get("height")
-    width = prompt.values.get("width")
-    batch_size = prompt.values.get("batch_size")
-    seed = prompt.values.get("seed").split(",")
-    seed_step = prompt.values.get("seed_step")
+    guidance = request.values.get("guidance")
+    iterations = request.values.get("iterations")
+    height = request.values.get("height")
+    width = request.values.get("width")
+    batch_size = request.values.get("batch_size")
+    seed = request.values.get("seed").split(",")
+    seed_step = request.values.get("seed_step")
     prompt_id = request.headers.get("prompt_id")
+    if prompt_id == "":
+        prompt_id = str(uuid.uuid4())
     
     #pipe returns [images] and if [nsfw_content_detected] 
     images, nsfw, seeds = process_txt2img_prompt(prompt, guidance, iterations, height, width, batch_size, seed, seed_step)
@@ -139,12 +130,12 @@ def load_model():
             beta_schedule="scaled_linear"
         )
         
-        model = "CompVis/stable-diffusion-v1-4" if model_path == "" else model_path
-        if lower_mem == False:
+        model = "CompVis/stable-diffusion-v1-4" if config["modelpath"] == "" else config["modelpath"]
+        if config["lowermem"] == False:
             pipe = StableDiffusionPipeline.from_pretrained(
                 model, 
                 scheduler=lms,
-                use_auth_token=access_token
+                use_auth_token=config["accesstoken"]
             )
         else:
             pipe = StableDiffusionPipeline.from_pretrained(
@@ -152,25 +143,26 @@ def load_model():
                 revision="fp16", 
                 torch_dtype=torch.float16,
                 scheduler=lms,
-                use_auth_token=access_token
+                use_auth_token=config["accesstoken"]
             )
         
         if torch.cuda.is_available():
-            app.logger.info("using cuda")
-            pipe = pipe.to("cuda:1")
-            if lower_mem:
+            app.logger.info("loading model to cuda gpu "+str(config["gpu"]))
+            pipe = pipe.to("cuda:"+str(config["gpu"]))
+            if config["lowermem"]:
                 app.logger.info("pipe set to use less gpu memory")
                 pipe.enable_attention_slicing()
         
-    except:
-        app.logger.warning("could not load model, make sure access token or model_path is set")
+    except Exception as e: 
+        print(e)
+        app.logger.warning("could not load model, make sure accesstoken or modelpath is set")
         pipe = None
         lms = None
         
 def process_txt2img_prompt(prompt='', guidance=7.5, iterations=50, height=512, width=512, batch_size=1, seed='', seed_step=0):
-    height = min(max_height, int(height))
-    width = min(max_width, int(width))
-    batch_size = min(max_batch_sie, int(batch_size))
+    height = min(config["maxheight"], int(height))
+    width = min(config["maxwidth"], int(width))
+    batch_size = min(config["maxbatchsize"], int(batch_size))
     
     if prompt == ['']:
         return make_response("must input prompt",400)
@@ -250,31 +242,41 @@ def torch_gc():
     
 def main(args):
     
-    
-    url = "https://" + args.ipaddr + ":" + args.port
     sdrequests.secret = args.secret
-    gpu = args.gpu
-    lower_mem = args.lowermem
-    model_path = args.modelpath
-    max_height = args.maxheight
-    max_width = args.maxwidth
-    orch_can_set_config = args.orchcansetconfig
+    config["url"] = "https://" + args.ipaddr + ":" + args.port
+    config["gpu"] = args.gpu
+    config["lowermem"] = args.lowermem
+    config["modelpath"] = args.modelpath
+    config["maxheight"] = args.maxheight
+    config["maxwidth"] = args.maxwidth
+    config["orchcansetconfig"] = args.orchcansetconfig
+    config["accesstoken"] = args.accesstoken
     if args.id != "":
-        id = args.id
+        config["id"] = args.id
+    if args.maxsessions > 1:
+        t = threading.BoundedSemaphore(1)
     
+    print(worker_config())
+    app.logger.info("worker config set to:" + str(worker_config()))
     #register worker with O if specified
     if args.orchurl != "":
-        orch_url = args.orchurl
-        if not "https://" in args.orch_url:
-            orch_url = "https://"+orch_url
+        config["orchurl"] = args.orchurl
+        if not "https://" in args.orchurl:
+            config["orchurl"] = "https://"+config["orchurl"]
         
-        resp = sdrequests.post(orch_url+"/registerworker", json=worker_config())
+        resp = sdrequests.post(config["orchurl"]+"/registerworker", json=worker_config())
         if resp.status_code == 200:
-            app.logger.info("worker registered to orchestrator: "+orch_url)
+            app.logger.info("worker registered to orchestrator: "+config["orchurl"])
         else:
             app.logger.warning("worker could not register to orchestrator")
     
-    app.run(host=ip, port=p, ssl_context="adhoc", threaded=True)
+    load_model()
+    
+    if pipe != None:
+        app.logger.info("model loaded, starting web server")
+        app.run(host=args.ipaddr, port=args.port, ssl_context="adhoc", threaded=True)
+    else:
+        app.logger.info("model not loaded, exiting")
 
 if __name__=="__main__":
     parser = argparse.ArgumentParser()
@@ -284,6 +286,8 @@ if __name__=="__main__":
     parser.add_argument("--lowermem", type=bool, action="store", default=False)
     parser.add_argument("--maxheight", type=int, action="store", default=512)
     parser.add_argument("--maxwidth", type=int, action="store", default=512)
+    parser.add_argument("--maxsessions", type=int, action="store", default=1)
+    parser.add_argument("--accesstoken", type=str, action="store", default="")
     parser.add_argument("--modelpath", type=str, action="store", default="")
     parser.add_argument("--orchcansetconfig", type=bool, action="store", default=False)
     parser.add_argument("--id", type=str, action="store", default="")

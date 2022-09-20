@@ -11,9 +11,9 @@ class Sdrequests:
         
     def get(self, url="", params=None, data=None, headers={}):
         headers["Credentials"] = self.secret
-        resp = requests.get(url, params=p, data=d, headers=h, verify=self.verify_ssl)
+        resp = requests.get(url, params=params, data=data, headers=headers, verify=self.verify_ssl)
         
-        if match_response_secret(resp):
+        if self.match_response_secret(resp):
             return resp
         else:
             return self.wrong_secret
@@ -24,11 +24,18 @@ class Sdrequests:
         headers["Credentials"] = self.secret
         resp = requests.post(url, params=params, data=data, headers=headers, json=json, verify=self.verify_ssl)
         
-        if match_response_secret(resp):
+        if self.match_response_secret(resp):
             return resp
         else:
             return self.wrong_secret
-            
+    
+    def make_response_with_secret(self, msg, status_code):
+        resp = requests.models.Response()
+        resp.status_code = status_code
+        resp._content = msg.encode("ascii")
+        resp.headers["Credentials"] = self.secret
+        return resp
+    
     def match_request_secret(self, req):
         if req.headers.get("Credentials") == self.secret:
             return True
