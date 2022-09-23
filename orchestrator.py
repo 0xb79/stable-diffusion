@@ -1,6 +1,7 @@
 from flask import Flask, request, send_file, Response, make_response
 from torch import autocast, cuda
-import sys, os, io, logging, uuid, torch, requests, argparse, json
+from functools import wraps
+import sys, os, io, logging, uuid, torch, requests, argparse, json, time
 from diffusers import StableDiffusionPipeline, LMSDiscreteScheduler
 import sdhttp
 
@@ -9,16 +10,19 @@ logging.basicConfig(level=logging.INFO)
 app = Flask(__name__)
 
 config = {"sort_workers_by":"load"}
-
 sdrequests = sdhttp.Sdrequests()
-
 workers = {}
 
-#@app.before_request 
-#def check_secret():
-#    if sdrequests.match_request_secret(request) == False:
-#        return make_response("secret does not match", 500)
 
+def credentials_required(f):
+    @wraps(f)
+    def wrap(*args, **kwargs):
+        if "Credentials" in request.headers and sdrequests.match_request_secret(request):
+            return f(*args, **kwargs)
+        else:
+            return make_response("secret does not match", 400)
+    return wrap
+    
 @app.route("/txt2img", methods=['GET'])
 def process_txt2img():
     prompt = request.values.get("prompt")
@@ -59,21 +63,21 @@ def process_txt2img():
     else:
         width = 512
     
-    batch_size = request.values.get("batch_size")
+    batch_size = request.values.get("batchsize")
     if batch_size != None:
         if batch_size.isnumeric() == False:
-            return make_response("need to input numeric batch_size", 400)
+            return make_response("need to input numeric batchsize", 400)
     else:
-        batch_size = 3
+        batch_size = 1
     
     seed = request.values.get("seed")
     if seed == None:
         seed = ''
     
-    seed_step = request.values.get("seed_step")
+    seed_step = request.values.get("seedstep")
     if seed_step != None:
         if seed_step.isnumeric() == False:
-            return make_response("need to input numeric seed_step", 400)
+            return make_response("need to input numeric seedstep", 400)
         else:
             seed_step = 1
     else:
@@ -84,33 +88,67 @@ def process_txt2img():
         return make_response("no workers registered", 500)
         
     req = request.full_path
-    wkr = select_worker('load')
-    print(str(wkr))
-    resp = sdrequests.get(wkr['url']+"/txt2img",headers={"prompt_id":str(uuid.uuid4())},params={"prompt":prompt,"batch_size":batch_size,"guidance":guidance,"iterations":iterations,"height":height,"width":width,"seed":seed, "seed_step":seed_step})
-    
-    if resp.status_code == 200:
-        app.logger.info("image received from worker")
-        return send_file(resp.content, mimetype='image/png')
-    elif resp.status_code == 503:
-        app.logger.info("worker busy")
-        return make_response(resp.content, resp.status_code)
+    prompt_id = str(uuid.uuid4())
+    worker = select_worker('load')
+    if worker != None:
+        app.logger.info("worker selected: "+worker["id"])
+        start = time.time()
+        
+        resp = sdrequests.get(worker['url']+"/txt2img",headers={"prompt_id":prompt_id},params={"prompt":prompt,"batch_size":batch_size,"guidance":guidance,"iterations":iterations,"height":height,"width":width,"seed":seed, "seed_step":seed_step})
+        
+        if resp.status_code == 200:
+            app.logger.info("image received from worker")
+            took = int(time.time() - start)
+            worker_done(worker["id"], resp_time=took)
+            
+            img = io.BytesIO(resp.content)
+            return send_file(img, mimetype='image/png',download_name=prompt_id+".png")
+        elif resp.status_code == 503:
+            app.logger.info("worker busy")
+            worker_done(worker["id"])
+            
+            return make_response(resp.content, resp.status_code)
+        else:
+            app.logger.info("error from worker")
+            worker_done(worker["id"], True)
+            return make_response("could not process prompt", 500)
     else:
-        app.logger.info("error from worker")
-        return make_response("could not process prompt", 500)
+        app.logger.info("no workeer available")
+        return make_response("no workers available",503)
+
+@app.route("/workerstats", methods=['GET'])
+@credentials_required
+def worker_stats():
+    ws = workers
+    for i in ws.keys():
+        ws[i].pop("config",None)
+    return jsonify(ws)
 
 @app.route("/registerworker", methods=['POST'])
+@credentials_required
 def register_worker():
+    global workers
     w_config = request.get_json()
     app.logger.info("worker registration received: "+str(w_config))
     if w_config["url"] == "":
-        resp = sdrequests.make_response_with_secret('url must be set',400)
-        return (resp.text, resp.status_code, resp.headers.items())
+        resp = sdrequests.make_response_with_secret(make_response('url must be set',400))
+        return resp
     else:
-        workers[w_config["id"]] = {'config':w_config,'load':0,'score':0, 'resp_time':[], 'error_cnt':0}
+        workers[w_config["id"]] = {'config':w_config,'load':0,'score':[], 'resp_time':[], 'error_cnt':0}
         app.logger.info("worker registered  (id: "+w_config["id"]+")")
-        resp = sdrequests.make_response_with_secret('worker registered',200)
-        return (resp.text, resp.status_code, resp.headers.items())
-    
+        resp = sdrequests.make_response_with_secret(make_response('worker registered',200))
+        return resp
+
+
+@app.route("/workerisregistered/<id>", methods=['GET'])
+@credentials_required
+def worker_is_registered(id):
+    if id in workers.keys():
+        return sdrequests.make_response_with_secret(make_response("",200))
+    else:
+        app.logger.info("worker "+id+" not registered, expecting registration request")
+        return sdrequests.make_response_with_secret(make_response("",400))
+
 def select_worker(sort_by):
     sort_workers = []
     if sort_by == 'load':
@@ -120,24 +158,46 @@ def select_worker(sort_by):
     elif sort_by == 'error_cnt':
         sort_workers = sorted(workers.items(), key=lambda x: x[1]['error_cnt'], reverse=False)
     
-    return sort_workers[0][1]["config"]
+    for w in sort_workers:
+        if w[1]["config"]["maxsessions"] >= w[1]["load"]:
+            id = sort_workers[0][0]
+            workers[id]["load"] += 1
+            return w[1]["config"]
+    
+    return None
+
+def worker_done(id, iserror=False, resp_time=0):
+    #update load to remove prompt
+    workers[id]["load"] -= 1
+    #record error
+    if iserror:
+        workers[id]["error_cnt"] += 1
+    #track response time and score (based on 30 second response time)
+    if resp_time > 0:
+        if len(workers[id]["resp_time"]) == 10:
+            workers[id]["resp_time"].pop(0)
+        workers[id]["resp_time"].append(resp_time)
+        if len(workers[id]["score"]) == 10:
+            workers[id]["score"].pop(0)
+        workers[id]["score"].append(30 / resp_time)
 
 def remove_worker(id):
+    global workers
     try:
         del workers[id]
         app.logger.info("worker "+id+" removed")
     except:
         app.logger.info("could not remove worker "+id+". worker id not found")
 
-@app.route("/setworkerconfig")
-def set_worker_config():
+@app.route("/setworkerconfig/<id>")
+@credentials_required
+def set_worker_config(id):
     token = request.values.get("token")
     sessions = request.values.get("sessions")
     gpu = request.values.get("gpu")
     mh = request.values.get("maxheight")
     mw = request.values.get("maxwidth")
-    w_id = request.values.get("id")
-    w_url = workers[w_id]["url"]
+    w_url = workers[id]["config"]["url"]
     
     if token != None:
         resp = sdrequests.post(w_url+"/accesstoken", data={'token':token})
@@ -162,11 +222,10 @@ def set_worker_config():
         if mw != None:
             w = mw
         resp = sdrequests.post(w_url+"/maximagesize", data={"maxheight":h,"maxwidth":w})
-        
+    
+    resp = sdrequests.get(w_url+"/workerconfig")
+    
     return make_response("worker config updated",200)
-
-#def root_dir():
-#    return os.path.abspath(os.path.dirname(__file__))
 
 def main(args):
     sdrequests.secret = args.secret
