@@ -1,6 +1,7 @@
 from diffusers import StableDiffusionPipeline, LMSDiscreteScheduler
 import torch, sys, os, traceback
 
+
 pipe = None
 scheduler = None
 settings = {"accesstoken":"","modelpath":"","lowermem":False,"maxheight":512,"maxwidth":512,"device":"cpu","gpu":0,"maxbatchsize":32}
@@ -19,13 +20,14 @@ def process_txt2img_prompt(prompt='', guidance=7.5, iterations=50, height=512, w
                 latents, seeds = create_latents(seed, batch_size, seed_step, height, width)
                 output = pipe(prompt, guidance=guidance, iterations=iterations, height=height, width=width, latents=latents)
                 return output.images, output.nsfw_content_detected, seeds, False
+            torch_gc()
         else:
             with torch.autocast("cpu"):
                 latents, seeds = create_latents(seed, batch_size, seed_step, height, width)
                 output = pipe(prompt, guidance=guidance, iterations=iterations, height=height, width=width, latents=latents)
                 return output.images, output.nsfw_content_detected, seeds, False
             
-        torch_gc()
+        
     except Exception as ee:
         exc_type, exc_obj, exc_tb = sys.exc_info()
         fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]

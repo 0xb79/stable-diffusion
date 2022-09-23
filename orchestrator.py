@@ -1,4 +1,4 @@
-from flask import Flask, request, send_file, Response, make_response
+from flask import Flask, request, send_file, Response, make_response, jsonify
 from torch import autocast, cuda
 from functools import wraps
 import sys, os, io, logging, uuid, torch, requests, argparse, json, time
@@ -131,10 +131,14 @@ def register_worker():
     w_config = request.get_json()
     app.logger.info("worker registration received: "+str(w_config))
     if w_config["url"] == "":
-        resp = sdrequests.make_response_with_secret(make_response('url must be set',400))
+        resp = sdrequests.make_response_with_secret(make_response('url must be set',404))
         return resp
     else:
-        workers[w_config["id"]] = {'config':w_config,'load':0,'score':[], 'resp_time':[], 'error_cnt':0}
+        if w_config["id"] in workers.keys():
+            if workers[w_config["id"]]["remote_addr"] != request.remote_addr:
+                return sdrequests.make_response_with_secret(make_response('id already in use',400))
+        
+        workers[w_config["id"]] = {'config':w_config,'load':0,'score':[], 'resp_time':[], 'error_cnt':0, "remote_addr":request.remote_addr}
         app.logger.info("worker registered  (id: "+w_config["id"]+")")
         resp = sdrequests.make_response_with_secret(make_response('worker registered',200))
         return resp
@@ -144,7 +148,10 @@ def register_worker():
 @credentials_required
 def worker_is_registered(id):
     if id in workers.keys():
-        return sdrequests.make_response_with_secret(make_response("",200))
+        if workers[id]["remote_addr"] == request.remote_addr:
+            return sdrequests.make_response_with_secret(make_response("",200))
+        else:
+            return sqrequests.make_response_with_secret(make_response("",404))
     else:
         app.logger.info("worker "+id+" not registered, expecting registration request")
         return sdrequests.make_response_with_secret(make_response("",400))

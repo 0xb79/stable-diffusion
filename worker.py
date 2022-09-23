@@ -10,7 +10,7 @@ config={"url":"","id":uuid.uuid4(),"orchurl":"","orchcansetconfig":False,"maxses
 
 sdrequests = sdhttp.Sdrequests()
 t = threading.BoundedSemaphore(1)
-mw = threading.Timer(30, monitor_worker_registered)
+
 
 app = Flask(__name__)
 
@@ -151,16 +151,25 @@ def register_with_orch():
     resp = sdrequests.post(config["orchurl"]+"/registerworker", json=worker_config())
     if resp.status_code == 200:
         app.logger.info("worker registered to orchestrator: "+config["orchurl"])
+    elif resp.status_code == 400:
+        app.logger.info("worker could not register, id already in use")
     else:
         app.logger.warning("worker could not register to orchestrator")
         
 def monitor_worker_registered():
     global config
     resp = sdrequests.get(config["orchurl"]+"/workerisregistered/"+config["id"])
-    if resp.status_code != 200:
+    if resp.status_code == 400:
         app.logger.info("re-registering with orch")
         register_with_orch()
+    elif resp.status_code == 404:
+        app.logger.info("worker id already in use, enter a new worker id")
+    else:
+        #worker is already registered from this IP
+        return
+    
 
+mw = threading.Timer(30, monitor_worker_registered)
 def main(args):
     global config
     sdrequests.secret = args.secret
@@ -196,9 +205,13 @@ def main(args):
     
     if sd.pipe != None:
         app.logger.info("model loaded, starting web server")
-        app.run(host=args.ipaddr, port=args.port, ssl_context="adhoc", threaded=True)
+        if args.ipaddr == "127.0.0.1":
+            app.run(host="127.0.0.1", port=args.port, ssl_context="adhoc", threaded=True)
+        else:
+            app.run(host="0.0.0.0", port=args.port, ssl_context="adhoc", threaded=True)
     else:
         app.logger.info("model not loaded, exiting")
+
 
 if __name__=="__main__":
     parser = argparse.ArgumentParser()
