@@ -84,7 +84,7 @@ def max_image_size():
 
 @app.route("/workerstatus")
 def send_status():
-    return make_response("running",200)
+    return sdrequests.make_response_with_secret(make_response("running",200))
     
 @app.route("/workerconfig", methods=['GET'])
 def send_worker_config():

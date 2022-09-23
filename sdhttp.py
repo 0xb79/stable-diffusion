@@ -14,7 +14,7 @@ class Sdrequests:
         
     def get(self, url="", params=None, data=None, headers={}):
         headers["Credentials"] = self.secret
-        resp = requests.get(url, params=params, data=data, headers=headers, verify=self.verify_ssl)
+        resp = requests.get(url, params=params, data=data, headers=headers, verify=self.verify_ssl, timeout=90)
         
         if self.match_response_secret(resp):
             return resp
@@ -25,7 +25,7 @@ class Sdrequests:
         
     def post(self, url="", params=None, data=None, headers={}, json={}):
         headers["Credentials"] = self.secret
-        resp = requests.post(url, params=params, data=data, headers=headers, json=json, verify=self.verify_ssl)
+        resp = requests.post(url, params=params, data=data, headers=headers, json=json, verify=self.verify_ssl, timeout=90)
         if self.match_response_secret(resp):
             return resp
         else:

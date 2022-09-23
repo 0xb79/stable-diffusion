@@ -1,7 +1,7 @@
 from flask import Flask, request, send_file, Response, make_response, jsonify
 from torch import autocast, cuda
 from functools import wraps
-import sys, os, io, logging, uuid, torch, requests, argparse, json, time
+import sys, os, io, logging, uuid, torch, requests, argparse, json, time, copy, threading
 from diffusers import StableDiffusionPipeline, LMSDiscreteScheduler
 import sdhttp
 
@@ -121,7 +121,7 @@ def process_txt2img():
 @app.route("/workerstats", methods=['GET'])
 @credentials_required
 def worker_stats():
-    ws = workers
+    ws = copy.deepcopy(workers)
     for i in ws.keys():
         ws[i].pop("config",None)
     return jsonify(ws)
@@ -142,18 +142,19 @@ def register_worker():
                 app.logger.info("worker id ("+w_config["id"]+") already registered at different ip address")
                 return sdrequests.make_response_with_secret(make_response('id already in use',400))
         
-        workers[w_config["id"]] = {'config':w_config,'load':0,'score':[], 'resp_time':[], 'error_cnt':0, "remote_addr":w_ip}
+        workers[w_config["id"]] = {'config':w_config,'load':0,'score':[], 'resp_time':[], 'error_cnt':0, "remote_addr":w_ip, "last_checkin":0,"last_status_check":0}
         app.logger.info("worker registered  (id: "+w_config["id"]+")")
         resp = sdrequests.make_response_with_secret(make_response('worker registered',200))
         return resp
 
-
 @app.route("/workerisregistered/<id>", methods=['GET'])
 @credentials_required
 def worker_is_registered(id):
+    global workers
     w_ip = worker_ip(request)
     if id in workers.keys():
         if workers[id]["remote_addr"] == w_ip:
+            workers[id]["last_checkin"] = time.time()
             return sdrequests.make_response_with_secret(make_response("",200))
         else:
             return sdrequests.make_response_with_secret(make_response("worker id already registered a differnet ip address",404))
@@ -161,11 +162,28 @@ def worker_is_registered(id):
         app.logger.info("worker "+id+" not registered, expecting registration request")
         return sdrequests.make_response_with_secret(make_response("",400))
 
+def monitor_workers():
+    global workers
+    while True:
+        time.sleep(10)
+        del_workers=[]
+        for w in workers.keys():
+            resp = sdrequests.get(workers[w]["config"]["url"]+"/workerstatus")
+            print(resp.text)
+            if resp.status_code != 200:
+                app.logger.info("worker "+w+" did not respond, removing")
+                del_workers.append(w)
+            else:
+                workers[w]["last_status_check"] = time.time()
+        
+        for d in del_workers:
+            remove_worker(d)
+
 def worker_ip(req):
     return request.environ.get('HTTP_X_REAL_IP', request.remote_addr)
     
 def select_worker(sort_by):
-    sort_workers = []
+    sort_workers = {}
     if sort_by == 'load':
         sort_workers = dict(sorted(workers.items(), key=lambda x: x[1]['load'], reverse=False))
     elif sort_by == 'score':
@@ -173,12 +191,11 @@ def select_worker(sort_by):
     elif sort_by == 'error_cnt':
         sort_workers = dict(sorted(workers.items(), key=lambda x: x[1]['error_cnt'], reverse=False))
     
-    for w in sort_workers:
-        print(w[1])
-        if w[1]['config']['maxsessions'] >= w[1]['load']:
-            id = w[1]['config']['id']
+    for w in sort_workers.keys():
+        if sort_workers[w]['config']['maxsessions'] > sort_workers[w]['load']:
+            id = sort_workers[w]['config']['id']
             workers[id]["load"] += 1
-            return w[1]['config']
+            return sort_workers[w]['config']
     
     return None
 
@@ -243,9 +260,14 @@ def set_worker_config(id):
     
     return make_response("worker config updated",200)
 
+mw = threading.Timer(1, monitor_workers)
+mw.daemon = True
 def main(args):
     sdrequests.secret = args.secret
     sdrequests.verify_ssl = args.noselfsignedcert
+    
+    #store worker monitor
+    mw.start()
     
     app.logger.info("orchestrator config set, starting node")
     app.run(host=args.ipaddr, port=args.port)
