@@ -151,25 +151,27 @@ def register_with_orch():
     resp = sdrequests.post(config["orchurl"]+"/registerworker", json=worker_config())
     if resp.status_code == 200:
         app.logger.info("worker registered to orchestrator: "+config["orchurl"])
+        return True
     elif resp.status_code == 400:
         app.logger.info("worker could not register, id already in use")
+        return False
     else:
         app.logger.warning("worker could not register to orchestrator")
+        return False
         
 def monitor_worker_registered():
     global config
-    resp = sdrequests.get(config["orchurl"]+"/workerisregistered/"+config["id"])
-    if resp.status_code == 400:
-        app.logger.info("re-registering with orch")
-        register_with_orch()
-    elif resp.status_code == 404:
-        app.logger.info("worker id already in use, enter a new worker id")
-    else:
-        #worker is already registered from this IP
-        return
-    
+    while True:
+        resp = sdrequests.get(config["orchurl"]+"/workerisregistered/"+config["id"])
+        if resp.status_code == 400:
+            app.logger.info("re-registering with orch")
+            register_with_orch()
+        elif resp.status_code == 404:
+            app.logger.info("worker id already in use, enter a new worker id")
+        time.sleep(30)
 
-mw = threading.Timer(30, monitor_worker_registered)
+mw = threading.Timer(1, monitor_worker_registered)
+mw.daemon = True
 def main(args):
     global config
     sdrequests.secret = args.secret
@@ -197,9 +199,11 @@ def main(args):
         config["orchurl"] = args.orchurl
         if not "https://" in args.orchurl:
             config["orchurl"] = "https://"+config["orchurl"]
-        register_with_orch()
-        #start worker registered monitor
-        mw.start()
+        if register_with_orch():
+            #start worker registered monitor
+            mw.start()
+        else:
+            return
     #load the model
     sd.load_model()
     

@@ -93,24 +93,26 @@ def process_txt2img():
     if worker != None:
         app.logger.info("worker selected: "+worker["id"])
         start = time.time()
+        try:
+            resp = sdrequests.get(worker['url']+"/txt2img",headers={"prompt_id":prompt_id},params={"prompt":prompt,"batch_size":batch_size,"guidance":guidance,"iterations":iterations,"height":height,"width":width,"seed":seed, "seed_step":seed_step})
         
-        resp = sdrequests.get(worker['url']+"/txt2img",headers={"prompt_id":prompt_id},params={"prompt":prompt,"batch_size":batch_size,"guidance":guidance,"iterations":iterations,"height":height,"width":width,"seed":seed, "seed_step":seed_step})
-        
-        if resp.status_code == 200:
-            app.logger.info("image received from worker")
-            took = int(time.time() - start)
-            worker_done(worker["id"], resp_time=took)
-            
-            img = io.BytesIO(resp.content)
-            return send_file(img, mimetype='image/png',download_name=prompt_id+".png")
-        elif resp.status_code == 503:
-            app.logger.info("worker busy")
-            worker_done(worker["id"])
-            
-            return make_response(resp.content, resp.status_code)
-        else:
-            app.logger.info("error from worker")
-            worker_done(worker["id"], True)
+            if resp.status_code == 200:
+                app.logger.info("image received from worker")
+                took = int(time.time() - start)
+                worker_done(worker["id"], resp_time=took)
+                
+                img = io.BytesIO(resp.content)
+                return send_file(img, mimetype='image/png',download_name=prompt_id+".png")
+            elif resp.status_code == 503:
+                app.logger.info("worker busy")
+                worker_done(worker["id"])
+                
+                return make_response(resp.content, resp.status_code)
+            else:
+                app.logger.info("error from worker")
+                worker_done(worker["id"], True)
+                return make_response("could not process prompt", 500)
+        except Exception as ee:
             return make_response("could not process prompt", 500)
     else:
         app.logger.info("no workeer available")
@@ -129,16 +131,18 @@ def worker_stats():
 def register_worker():
     global workers
     w_config = request.get_json()
+    w_ip = worker_ip(request)
     app.logger.info("worker registration received: "+str(w_config))
     if w_config["url"] == "":
         resp = sdrequests.make_response_with_secret(make_response('url must be set',404))
         return resp
     else:
         if w_config["id"] in workers.keys():
-            if workers[w_config["id"]]["remote_addr"] != request.remote_addr:
+            if workers[w_config["id"]]["remote_addr"] != w_ip:
+                app.logger.info("worker id ("+w_config["id"]+") already registered at different ip address")
                 return sdrequests.make_response_with_secret(make_response('id already in use',400))
         
-        workers[w_config["id"]] = {'config':w_config,'load':0,'score':[], 'resp_time':[], 'error_cnt':0, "remote_addr":request.remote_addr}
+        workers[w_config["id"]] = {'config':w_config,'load':0,'score':[], 'resp_time':[], 'error_cnt':0, "remote_addr":w_ip}
         app.logger.info("worker registered  (id: "+w_config["id"]+")")
         resp = sdrequests.make_response_with_secret(make_response('worker registered',200))
         return resp
@@ -147,29 +151,34 @@ def register_worker():
 @app.route("/workerisregistered/<id>", methods=['GET'])
 @credentials_required
 def worker_is_registered(id):
+    w_ip = worker_ip(request)
     if id in workers.keys():
-        if workers[id]["remote_addr"] == request.remote_addr:
+        if workers[id]["remote_addr"] == w_ip:
             return sdrequests.make_response_with_secret(make_response("",200))
         else:
-            return sqrequests.make_response_with_secret(make_response("",404))
+            return sdrequests.make_response_with_secret(make_response("worker id already registered a differnet ip address",404))
     else:
         app.logger.info("worker "+id+" not registered, expecting registration request")
         return sdrequests.make_response_with_secret(make_response("",400))
 
+def worker_ip(req):
+    return request.environ.get('HTTP_X_REAL_IP', request.remote_addr)
+    
 def select_worker(sort_by):
     sort_workers = []
     if sort_by == 'load':
-        sort_workers = sorted(workers.items(), key=lambda x: x[1]['load'], reverse=False)
+        sort_workers = dict(sorted(workers.items(), key=lambda x: x[1]['load'], reverse=False))
     elif sort_by == 'score':
-        sort_workers = sorted(workers.items(), key=lambda x: x[1]['score'], reverse=True)
+        sort_workers = dict(sorted(workers.items(), key=lambda x: x[1]['score'], reverse=True))
     elif sort_by == 'error_cnt':
-        sort_workers = sorted(workers.items(), key=lambda x: x[1]['error_cnt'], reverse=False)
+        sort_workers = dict(sorted(workers.items(), key=lambda x: x[1]['error_cnt'], reverse=False))
     
     for w in sort_workers:
-        if w[1]["config"]["maxsessions"] >= w[1]["load"]:
-            id = sort_workers[0][0]
+        print(w[1])
+        if w[1]['config']['maxsessions'] >= w[1]['load']:
+            id = w[1]['config']['id']
             workers[id]["load"] += 1
-            return w[1]["config"]
+            return w[1]['config']
     
     return None
 
