@@ -6,7 +6,7 @@ from PIL.PngImagePlugin import PngInfo
 
 logging.basicConfig(level=logging.INFO)
 outputs = {}
-config={"url":"","id":uuid.uuid4(),"orchurl":"","orchcansetconfig":False,"maxsessions":1}
+config={"url":"","id":uuid.uuid4(),"orchurl":"","orchcansetconfig":False,"maxsessions":1,"in_process":0}
 
 sdrequests = sdhttp.Sdrequests()
 t = threading.BoundedSemaphore(1)
@@ -84,7 +84,7 @@ def max_image_size():
 
 @app.route("/workerstatus")
 def send_status():
-    return sdrequests.make_response_with_secret(make_response("running",200))
+    return sdrequests.make_response_with_secret(make_response(config["in_process"],200))
     
 @app.route("/workerconfig", methods=['GET'])
 def send_worker_config():
@@ -96,6 +96,7 @@ def worker_config():
 
 @app.route("/txt2img", methods=['GET'])
 def txt2img():
+    global config
     prompt = request.values.get("prompt")
     if prompt == "":
         return make_response("prompt must be specified",400)
@@ -115,9 +116,12 @@ def txt2img():
     try:
         with t:
             #pipe returns [images] and if [nsfw_content_detected]
+            config["in_process"] += 1
             images, nsfw, seeds, is_busy = sd.process_txt2img_prompt(prompt, guidance, iterations, height, width, batch_size, seed, seed_step)
     except ValueError as ve:
         return make_response("image processing busy, please re-submit", 503)
+    finally:
+        config["in_process"] -= 1
     
     if images != None:
         grid = image_grid(images,1,batch_size)

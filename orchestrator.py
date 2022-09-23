@@ -115,7 +115,7 @@ def process_txt2img():
         except Exception as ee:
             return make_response("could not process prompt", 500)
     else:
-        app.logger.info("no workeer available")
+        app.logger.info("no worker available")
         return make_response("no workers available",503)
 
 @app.route("/workerstats", methods=['GET'])
@@ -169,12 +169,15 @@ def monitor_workers():
         del_workers=[]
         for w in workers.keys():
             resp = sdrequests.get(workers[w]["config"]["url"]+"/workerstatus")
-            print(resp.text)
-            if resp.status_code != 200:
+            if resp.status_code == 200:
+                if resp.text.isnumeric():
+                    if workers[w]["load"] != int(resp.text):
+                        app.logger.info("worker reported different in process prompts: worker="+resp.text+" orch="+workers[w]["load"]+". updated to worker reported load")
+                        workers[w]["load"] = int(resp.text)
+                workers[w]["last_status_check"] = time.time()
+            else:
                 app.logger.info("worker "+w+" did not respond, removing")
                 del_workers.append(w)
-            else:
-                workers[w]["last_status_check"] = time.time()
         
         for d in del_workers:
             remove_worker(d)
