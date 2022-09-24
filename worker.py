@@ -3,23 +3,33 @@ from flask import Flask, request, send_file, make_response, jsonify
 import sdhttp, sd
 from PIL import Image
 from PIL.PngImagePlugin import PngInfo
+from functools import wraps
 
 logging.basicConfig(level=logging.INFO)
 outputs = {}
 config={"url":"","id":uuid.uuid4(),"orchurl":"","orchcansetconfig":False,"maxsessions":1,"in_process":0}
 
-sdrequests = sdhttp.Sdrequests()
+sdr = sdhttp.InternalRequests()
 t = threading.BoundedSemaphore(1)
 
 
 app = Flask(__name__)
 
-@app.before_request 
-def check_secret():
-    if sdrequests.match_request_secret(request) == False:
-        return make_response("secret does not match",500)
-    
+#@app.before_request 
+#def check_secret():
+#    if sdr.match_request_secret(request) == False:
+#        return make_response("secret does not match", 500)
+def internal(f):
+    @wraps(f)
+    def wrap(*args, **kwargs):
+        if "Credentials" in request.headers and sdr.match_request_secret(request):
+            return f(*args, **kwargs)
+        else:
+            return make_response("secret does not match", 400)
+    return wrap
+
 @app.route("/maxsessions", methods=['GET','POST'])
+@internal
 def max_sessions():
     if request.method == 'GET':
         return jsonify({"maxsessions":config["maxsessions"]}), 200
@@ -33,6 +43,7 @@ def max_sessions():
             return make_response("sessions not input as integer", 400)
     
 @app.route("/accesstoken", methods=['GET','POST'])
+@internal
 def access_token():
     if request.method == 'GET':
         return jsonify({"accesstoken":sd.config["accesstoken"]}), 200
@@ -46,6 +57,7 @@ def access_token():
             return make_response("token not input correctly (start with 'hf' and be 37 characters", 400)
 
 @app.route("/device", methods=['GET','POST'])
+@internal
 def gpu():
     if request.method == 'GET':
         return jsonify({"device":sd.settings["device"],"gpu":sd.settings["gpu"]}), 200
@@ -68,6 +80,7 @@ def gpu():
         return make_response("Ok", 200)
 
 @app.route("/maximagesize", methods=['GET','POST'])
+@internal
 def max_image_size():
     if request.method == 'GET':
         return jsonify({"maxheight":sd.settings["maxheight"],"maxwidth":sd.settings["maxwidth"]})
@@ -83,10 +96,12 @@ def max_image_size():
             return make_response("must input numeric height and width", 400)
 
 @app.route("/workerstatus")
+@internal
 def send_status():
-    return sdrequests.make_response_with_secret(make_response(config["in_process"],200))
+    return sdr.make_response_with_secret(str(config["in_process"]),200)
     
 @app.route("/workerconfig", methods=['GET'])
+@internal
 def send_worker_config():
     config = worker_config()
     return jsonify(config), 200
@@ -95,6 +110,7 @@ def worker_config():
     return {**config, **sd.settings}
 
 @app.route("/txt2img", methods=['GET'])
+@internal
 def txt2img():
     global config
     prompt = request.values.get("prompt")
@@ -107,9 +123,9 @@ def txt2img():
     iterations = int(request.values.get("iterations"))
     height = int(request.values.get("height"))
     width = int(request.values.get("width"))
-    batch_size = int(request.values.get("batch_size"))
+    batch_size = int(request.values.get("batchsize"))
     seed = request.values.get("seed").split(",")
-    seed_step = int(request.values.get("seed_step"))
+    seed_step = int(request.values.get("seedstep"))
     prompt_id = request.headers.get("prompt_id")
     if prompt_id == "":
         prompt_id = str(uuid.uuid4())
@@ -127,11 +143,12 @@ def txt2img():
         grid = image_grid(images,1,batch_size)
         grid_with_data = io.BytesIO()
         md = PngInfo()
+        md.add_text("SD:prompt", prompt)
         md.add_text("SD:prompt_id", prompt_id)
         md.add_text("SD:seeds", ",".join([str(s) for s in seeds]))
         grid.save(grid_with_data, pnginfo=md, format="png")
         grid_with_data.seek(0)
-        return sdrequests.send_file_with_secret(send_file(grid_with_data, mimetype='image/png'))
+        return sdr.send_file_with_secret(grid_with_data, addl_headers={"prompt_id":prompt_id})
     else:
         if is_busy == True:
             return make_response("image processing busy, please re-submit", 503)
@@ -152,7 +169,7 @@ def image_grid(imgs, rows, cols):
 def register_with_orch():
     global config
     app.logger.info("registering with orchestrator: "+config["orchurl"])
-    resp = sdrequests.post(config["orchurl"]+"/registerworker", json=worker_config())
+    resp = sdr.post(config["orchurl"]+"/registerworker", json=worker_config())
     if resp.status_code == 200:
         app.logger.info("worker registered to orchestrator: "+config["orchurl"])
         return True
@@ -166,7 +183,7 @@ def register_with_orch():
 def monitor_worker_registered():
     global config
     while True:
-        resp = sdrequests.get(config["orchurl"]+"/workerisregistered/"+config["id"])
+        resp = sdr.get(config["orchurl"]+"/workerisregistered/"+config["id"])
         if resp.status_code == 400:
             app.logger.info("re-registering with orch")
             register_with_orch()
@@ -178,7 +195,7 @@ mw = threading.Timer(1, monitor_worker_registered)
 mw.daemon = True
 def main(args):
     global config
-    sdrequests.secret = args.secret
+    sdr.secret = args.secret
     #set worker config
     config["url"] = "https://" + args.ipaddr + ":" + args.port
     if args.id != "":
@@ -189,6 +206,7 @@ def main(args):
     #set stable diffusion config
     sd.settings["gpu"] = args.gpu
     sd.settings["lowermem"] = args.lowermem
+    sd.settings["slicemem"] = args.slicemem
     sd.settings["modelpath"] = args.modelpath
     sd.settings["maxheight"] = args.maxheight
     sd.settings["maxwidth"] = args.maxwidth
@@ -198,20 +216,22 @@ def main(args):
     
     app.logger.info("worker config set to:" + str(worker_config()))
     app.logger.info("stable diffusions settings are: " + str(sd.settings))
-    #register worker with O if specified
-    if args.orchurl != "":
-        config["orchurl"] = args.orchurl
-        if not "https://" in args.orchurl:
-            config["orchurl"] = "https://"+config["orchurl"]
-        if register_with_orch():
-            #start worker registered monitor
-            mw.start()
-        else:
-            return
+    
     #load the model
     sd.load_model()
     
     if sd.pipe != None:
+        #register worker with O if specified
+        if args.orchurl != "":
+            config["orchurl"] = args.orchurl
+            if not "https://" in args.orchurl:
+                config["orchurl"] = "https://"+config["orchurl"]
+            if register_with_orch():
+                #start worker registered monitor
+                mw.start()
+            else:
+                return
+        
         app.logger.info("model loaded, starting web server")
         if args.ipaddr == "127.0.0.1":
             app.run(host="127.0.0.1", port=args.port, ssl_context="adhoc", threaded=True)
@@ -226,13 +246,14 @@ if __name__=="__main__":
     parser.add_argument("--ipaddr", type=str, action="store", default="127.0.0.1")
     parser.add_argument("--port", type=str, action="store", default="5555")
     parser.add_argument("--secret", type=str, action="store", default="stablediffusion")
-    parser.add_argument("--lowermem", type=bool, action="store", default=False)
+    parser.add_argument("--slicemem", action="store_true")
+    parser.add_argument("--lowermem", action="store_true")
     parser.add_argument("--maxheight", type=int, action="store", default=512)
     parser.add_argument("--maxwidth", type=int, action="store", default=512)
     parser.add_argument("--maxsessions", type=int, action="store", default=1)
     parser.add_argument("--accesstoken", type=str, action="store", default="")
     parser.add_argument("--modelpath", type=str, action="store", default="")
-    parser.add_argument("--orchcansetconfig", type=bool, action="store", default=False)
+    parser.add_argument("--orchcansetconfig", action="store_true")
     parser.add_argument("--id", type=str, action="store", default="")
     parser.add_argument("--orchurl", type=str, action="store", default="")
     parser.add_argument("--device", type=str, action="store", default=0, help="cpu or cuda")

@@ -9,15 +9,23 @@ logging.basicConfig(level=logging.INFO)
 
 app = Flask(__name__)
 
-config = {"sort_workers_by":"load"}
-sdrequests = sdhttp.Sdrequests()
+config = {"sort_workers_by":"load","managesecret":""}
+sdr = sdhttp.InternalRequests()
 workers = {}
 
-
+def internal(f):
+    @wraps(f)
+    def wrap(*args, **kwargs):
+        if "Credentials" in request.headers and sdr.match_request_secret(request):
+            return f(*args, **kwargs)
+        else:
+            return make_response("secret does not match", 400)
+    return wrap
+    
 def credentials_required(f):
     @wraps(f)
     def wrap(*args, **kwargs):
-        if "Credentials" in request.headers and sdrequests.match_request_secret(request):
+        if request.environ.get("HTTP_CREDENTIALS","") == config["managesecret"]:
             return f(*args, **kwargs)
         else:
             return make_response("secret does not match", 400)
@@ -94,7 +102,7 @@ def process_txt2img():
         app.logger.info("worker selected: "+worker["id"])
         start = time.time()
         try:
-            resp = sdrequests.get(worker['url']+"/txt2img",headers={"prompt_id":prompt_id},params={"prompt":prompt,"batch_size":batch_size,"guidance":guidance,"iterations":iterations,"height":height,"width":width,"seed":seed, "seed_step":seed_step})
+            resp = sdr.get(worker['url']+"/txt2img",headers={"prompt_id":prompt_id},params={"prompt":prompt,"batchsize":batch_size,"guidance":guidance,"iterations":iterations,"height":height,"width":width,"seed":seed, "seedstep":seed_step})
         
             if resp.status_code == 200:
                 app.logger.info("image received from worker")
@@ -118,69 +126,65 @@ def process_txt2img():
         app.logger.info("no worker available")
         return make_response("no workers available",503)
 
-@app.route("/workerstats", methods=['GET'])
-@credentials_required
-def worker_stats():
-    ws = copy.deepcopy(workers)
-    for i in ws.keys():
-        ws[i].pop("config",None)
-    return jsonify(ws)
-
 @app.route("/registerworker", methods=['POST'])
-@credentials_required
+@internal
 def register_worker():
     global workers
     w_config = request.get_json()
     w_ip = worker_ip(request)
     app.logger.info("worker registration received: "+str(w_config))
     if w_config["url"] == "":
-        resp = sdrequests.make_response_with_secret(make_response('url must be set',404))
+        resp = sdr.make_response_with_secret('url must be set',404)
         return resp
     else:
         if w_config["id"] in workers.keys():
             if workers[w_config["id"]]["remote_addr"] != w_ip:
                 app.logger.info("worker id ("+w_config["id"]+") already registered at different ip address")
-                return sdrequests.make_response_with_secret(make_response('id already in use',400))
+                return sdr.make_response_with_secret('id already in use',400)
         
         workers[w_config["id"]] = {'config':w_config,'load':0,'score':[], 'resp_time':[], 'error_cnt':0, "remote_addr":w_ip, "last_checkin":0,"last_status_check":0}
         app.logger.info("worker registered  (id: "+w_config["id"]+")")
-        resp = sdrequests.make_response_with_secret(make_response('worker registered',200))
+        resp = sdr.make_response_with_secret('worker registered',200)
         return resp
 
 @app.route("/workerisregistered/<id>", methods=['GET'])
-@credentials_required
+@internal
 def worker_is_registered(id):
     global workers
     w_ip = worker_ip(request)
     if id in workers.keys():
         if workers[id]["remote_addr"] == w_ip:
             workers[id]["last_checkin"] = time.time()
-            return sdrequests.make_response_with_secret(make_response("",200))
+            return sdr.make_response_with_secret("",200)
         else:
-            return sdrequests.make_response_with_secret(make_response("worker id already registered a differnet ip address",404))
+            return sdr.make_response_with_secret("worker id already registered a differnet ip address",404)
     else:
         app.logger.info("worker "+id+" not registered, expecting registration request")
-        return sdrequests.make_response_with_secret(make_response("",400))
+        return sdr.make_response_with_secret("",400)
 
 def monitor_workers():
     global workers
     while True:
         time.sleep(10)
-        del_workers=[]
-        for w in workers.keys():
-            resp = sdrequests.get(workers[w]["config"]["url"]+"/workerstatus")
-            if resp.status_code == 200:
-                if resp.text.isnumeric():
-                    if workers[w]["load"] != int(resp.text):
-                        app.logger.info("worker reported different in process prompts: worker="+resp.text+" orch="+workers[w]["load"]+". updated to worker reported load")
-                        workers[w]["load"] = int(resp.text)
-                workers[w]["last_status_check"] = time.time()
-            else:
-                app.logger.info("worker "+w+" did not respond, removing")
-                del_workers.append(w)
+        try:
+            del_workers=[]
+            for w in workers.keys():
+                resp = sdr.get(workers[w]["config"]["url"]+"/workerstatus")
+                if resp.status_code == 200:
+                    if resp.text.isnumeric():
+                        if workers[w]["load"] != int(resp.text):
+                            app.logger.info("worker reported different in process prompts: worker="+resp.text+" orch="+workers[w]["load"]+". updated to worker reported load")
+                            workers[w]["load"] = int(resp.text)
+                    workers[w]["last_status_check"] = time.time()
+                else:
+                    app.logger.info("worker "+w+" did not respond, removing")
+                    del_workers.append(w)
+            
+            for d in del_workers:
+                remove_worker(d)
+        except Exception as ee:
+            app.logger.info("worker monitor experienced and error ("+str(ee)+")")
         
-        for d in del_workers:
-            remove_worker(d)
 
 def worker_ip(req):
     return request.environ.get('HTTP_X_REAL_IP', request.remote_addr)
@@ -225,6 +229,15 @@ def remove_worker(id):
     except:
         app.logger.info("could not remove worker "+id+". worker id not found")
 
+
+@app.route("/workerstats", methods=['GET'])
+@credentials_required
+def worker_stats():
+    ws = copy.deepcopy(workers)
+    for i in ws.keys():
+        ws[i].pop("config",None)
+    return jsonify(ws)
+    
 @app.route("/setworkerconfig/<id>")
 @credentials_required
 def set_worker_config(id):
@@ -236,17 +249,17 @@ def set_worker_config(id):
     w_url = workers[id]["config"]["url"]
     
     if token != None:
-        resp = sdrequests.post(w_url+"/accesstoken", data={'token':token})
+        resp = sdr.post(w_url+"/accesstoken", data={'token':token})
         if resp.status_code != 200:
                 return make_response(resp.content, resp.status_code)
     
     if sessions != None:
-        resp = sdrequests.post(w_url+"/maxsessions", data={'sessions':sessions})
+        resp = sdr.post(w_url+"/maxsessions", data={'sessions':sessions})
         if resp.status_code != 200:
             return make_response(resp.content, resp.status_code)
     
     if gpu != None:
-        resp = sdrequests.post(w_url+"/gpu", data={'gpu':gpu})
+        resp = sdr.post(w_url+"/gpu", data={'gpu':gpu})
         if resp.status_code != 200:
             return make_response(resp.content, resp.status_code)
     
@@ -257,17 +270,19 @@ def set_worker_config(id):
             h = mh
         if mw != None:
             w = mw
-        resp = sdrequests.post(w_url+"/maximagesize", data={"maxheight":h,"maxwidth":w})
+        resp = sdr.post(w_url+"/maximagesize", data={"maxheight":h,"maxwidth":w})
     
-    resp = sdrequests.get(w_url+"/workerconfig")
+    resp = sdr.get(w_url+"/workerconfig")
     
     return make_response("worker config updated",200)
 
 mw = threading.Timer(1, monitor_workers)
 mw.daemon = True
 def main(args):
-    sdrequests.secret = args.secret
-    sdrequests.verify_ssl = args.noselfsignedcert
+    global config
+    sdr.secret = args.secret
+    sdr.verify_ssl = args.noselfsignedcert
+    config["managesecret"] = args.managesecret
     
     #store worker monitor
     mw.start()
@@ -281,6 +296,7 @@ if __name__=="__main__":
     parser.add_argument("--port", type=str, action="store", default="5555")
     parser.add_argument("--secret", type=str, action="store", default="stablediffusion")
     parser.add_argument("--noselfsignedcert", type=bool, action="store", default=False)
+    parser.add_argument("--managesecret", type=str, action="store", default="")
     args = parser.parse_args()
     
     main(args)

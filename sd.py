@@ -4,7 +4,7 @@ import torch, sys, os, traceback
 
 pipe = None
 scheduler = None
-settings = {"accesstoken":"","modelpath":"","lowermem":False,"maxheight":512,"maxwidth":512,"device":"cpu","gpu":0,"maxbatchsize":32}
+settings = {"accesstoken":"","modelpath":"","slicemem":False,"lowermem":False,"maxheight":512,"maxwidth":512,"device":"cpu","gpu":0,"maxbatchsize":32}
 
 def process_txt2img_prompt(prompt='', guidance=7.5, iterations=50, height=512, width=512, batch_size=1, seed=[''], seed_step=0):
     global pipe
@@ -24,7 +24,7 @@ def process_txt2img_prompt(prompt='', guidance=7.5, iterations=50, height=512, w
         else:
             with torch.autocast("cpu"):
                 latents, seeds = create_latents(seed, batch_size, seed_step, height, width)
-                output = pipe(prompt, guidance=guidance, iterations=iterations, height=height, width=width, latents=latents)
+                output = pipe(prompt, guidance=guidance, latents=latents, iterations=iterations, height=height, width=width)
                 return output.images, output.nsfw_content_detected, seeds, False
             
         
@@ -45,19 +45,16 @@ def create_latents(seed=[''], batch_size=1, seed_step=0, height=512, width=512):
     latents = None
     seeds = []
     seed = [] if seed == [''] else seed #set seed to zero length if none provided
-    
-    if len(seed) > 0 and seed != ['']:
+    if len(seed) > 0:
         for s in seed:
             generator.manual_seed(int(s))
             seeds.append(int(s))
-        else:
-            s = generator.seed()
-            seeds.append(s)
+            
             image_latents = torch.randn(
-                (1, pipe.unet.in_channels, height // 8, width // 8),
-                generator = generator,
-                device = settings["device"]
-            )
+                            (1, pipe.unet.in_channels, height // 8, width // 8),
+                            generator = generator,
+                            device = settings["device"]
+                            )
             latents = image_latents if latents is None else torch.cat((latents, image_latents))
     
     if batch_size > len(seed):
@@ -97,7 +94,7 @@ def load_model():
         )
         
         model = "CompVis/stable-diffusion-v1-4" if settings["modelpath"] == "" else settings["modelpath"]
-        if settings["lowermem"] == False:
+        if not settings["lowermem"]:
             pipe = StableDiffusionPipeline.from_pretrained(
                 model, 
                 scheduler=scheduler,
@@ -115,7 +112,7 @@ def load_model():
         if torch.cuda.is_available() and "cuda" in settings["device"]:
             print("loading model to cuda gpu "+str(settings["gpu"]))
             pipe = pipe.to(settings["device"])
-            if settings["lowermem"]:
+            if settings["slicemem"]:
                 print("pipe set to use less gpu memory")
                 pipe.enable_attention_slicing()
         else:
