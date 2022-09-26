@@ -4,6 +4,7 @@ from functools import wraps
 import sys, os, io, logging, uuid, torch, requests, argparse, json, time, copy, threading
 from diffusers import StableDiffusionPipeline, LMSDiscreteScheduler
 import sdhttp
+from helpers import is_number
 
 logging.basicConfig(level=logging.INFO)
 
@@ -22,7 +23,7 @@ def internal(f):
             return make_response("secret does not match", 400)
     return wrap
     
-def credentials_required(f):
+def manager(f):
     @wraps(f)
     def wrap(*args, **kwargs):
         if request.environ.get("HTTP_CREDENTIALS","") == config["managesecret"]:
@@ -31,7 +32,7 @@ def credentials_required(f):
             return make_response("secret does not match", 400)
     return wrap
     
-@app.route("/txt2img", methods=['GET'])
+@app.route("/txt2img", methods=['POST'])
 def process_txt2img():
     prompt = request.values.get("prompt")
     app.logger.info("processing txt2img prompt: " + prompt)
@@ -41,21 +42,21 @@ def process_txt2img():
     
     guidance = request.values.get("guidance")
     if guidance != None:
-        if guidance.isnumeric() == False:
+        if is_number(guidance) == False:
             return make_response("Need to input numeric guidance setting", 400)
     else:
         guidance = 7.5
     
     iterations = request.values.get("iterations")
     if iterations != None:
-        if iterations.isnumeric() == False:
+        if is_number(iterations) == False:
             return make_response("Need to input numeric iterations setting", 400)
     else:
         iterations = 50
     
     height = request.values.get("height")
     if height != None:
-        if height.isnumeric() == False:
+        if is_number(height) == False:
             return make_response("Need to input numeric height", 400)
         if (height % 64) != 0:
             return make_response("Need to input height increments of 64", 400)
@@ -64,7 +65,7 @@ def process_txt2img():
     
     width = request.values.get("width")
     if width != None:
-        if width.isnumeric() == False:
+        if is_number(width) == False:
             return make_response("Need to input numeric width", 400)
         if (width % 64) != 0:
             return make_response("Need to input width increments of 64", 400)
@@ -73,7 +74,7 @@ def process_txt2img():
     
     batch_size = request.values.get("batchsize")
     if batch_size != None:
-        if batch_size.isnumeric() == False:
+        if is_number(batch_size) == False:
             return make_response("need to input numeric batchsize", 400)
     else:
         batch_size = 1
@@ -84,7 +85,7 @@ def process_txt2img():
     
     seed_step = request.values.get("seedstep")
     if seed_step != None:
-        if seed_step.isnumeric() == False:
+        if is_number(seed_step) == False:
             return make_response("need to input numeric seedstep", 400)
         else:
             seed_step = 1
@@ -102,7 +103,7 @@ def process_txt2img():
         app.logger.info("worker selected: "+worker["id"])
         start = time.time()
         try:
-            resp = sdr.get(worker['url']+"/txt2img",headers={"prompt_id":prompt_id},params={"prompt":prompt,"batchsize":batch_size,"guidance":guidance,"iterations":iterations,"height":height,"width":width,"seed":seed, "seedstep":seed_step})
+            resp = sdr.post(worker['url']+"/txt2img",headers={"prompt_id":prompt_id},params={"prompt":prompt,"batchsize":batch_size,"guidance":guidance,"iterations":iterations,"height":height,"width":width,"seed":seed, "seedstep":seed_step})
         
             if resp.status_code == 200:
                 app.logger.info("image received from worker")
@@ -126,6 +127,85 @@ def process_txt2img():
         app.logger.info("no worker available")
         return make_response("no workers available",503)
 
+@app.route("/img2img", methods=['POST'])
+def process_img2img():
+    prompt = request.values.get("prompt")
+    app.logger.info("processing img2img prompt: " + prompt)
+    if (prompt == None or prompt == ""):
+        app.logger.info("prompt not set")
+        return make_response("Need to input prompt", 400)
+    
+    img = io.BytesIO(request.files.get("init_img"))
+    if img == None:
+        return make_response("no init_img provided", 400)
+        
+    guidance = request.values.get("guidance")
+    if guidance != None:
+        if is_number(guidance) == False:
+            return make_response("Need to input numeric guidance setting", 400)
+    else:
+        guidance = 7.5
+    
+    strength = request.values.get("strength")
+    if strength != None:
+        if is_number(strength) == False:
+            return make_response("Need to input numeric strength setting", 400)
+    else:
+        strength = .75
+    
+    iterations = request.values.get("iterations")
+    if iterations != None:
+        if is_number(iterations) == False:
+            return make_response("Need to input numeric iterations setting", 400)
+    else:
+        iterations = 50
+    
+    seed = request.values.get("seed")
+    if seed == None:
+        seed = ''
+    
+    batch_size = request.values.get("batchsize")
+    if batch_size != None:
+        if is_number(batch_size) == False:
+            return make_response("need to input numeric batchsize", 400)
+    else:
+        batch_size = 1
+    
+    #select worker to send to
+    if len(workers) == 0:
+        return make_response("no workers registered", 500)
+        
+    req = request.full_path
+    prompt_id = str(uuid.uuid4())
+    worker = select_worker('load')
+    if worker != None:
+        app.logger.info("worker selected: "+worker["id"])
+        start = time.time()
+        try:
+            resp = sdr.get(worker['url']+"/img2img",headers={"prompt_id":prompt_id},params={"prompt":prompt,"batchsize":batch_size,"guidance":guidance,"strength":strength,"iterations":iterations, "seed":seed})
+        
+            if resp.status_code == 200:
+                app.logger.info("image received from worker")
+                took = int(time.time() - start)
+                worker_done(worker["id"], resp_time=took)
+                
+                img = io.BytesIO(resp.content)
+                return send_file(img, mimetype='image/png',download_name=prompt_id+".png")
+            elif resp.status_code == 503:
+                app.logger.info("worker busy")
+                worker_done(worker["id"])
+                
+                return make_response(resp.content, resp.status_code)
+            else:
+                app.logger.info("error from worker")
+                worker_done(worker["id"], True)
+                return make_response("could not process prompt", 500)
+        except Exception as ee:
+            return make_response("could not process prompt", 500)
+    else:
+        app.logger.info("no worker available")
+        return make_response("no workers available",503)
+        
 @app.route("/registerworker", methods=['POST'])
 @internal
 def register_worker():
@@ -229,9 +309,13 @@ def remove_worker(id):
     except:
         app.logger.info("could not remove worker "+id+". worker id not found")
 
-
+@app.route("/orchestratorconfig")
+@manager
+def orchestrator_config():
+    return
+    
 @app.route("/workerstats", methods=['GET'])
-@credentials_required
+@manager
 def worker_stats():
     ws = copy.deepcopy(workers)
     for i in ws.keys():
@@ -239,7 +323,7 @@ def worker_stats():
     return jsonify(ws)
     
 @app.route("/setworkerconfig/<id>")
-@credentials_required
+@manager
 def set_worker_config(id):
     token = request.values.get("token")
     sessions = request.values.get("sessions")

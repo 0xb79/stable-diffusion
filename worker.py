@@ -4,21 +4,19 @@ import sdhttp, sd
 from PIL import Image
 from PIL.PngImagePlugin import PngInfo
 from functools import wraps
+from helpers import is_number
 
 logging.basicConfig(level=logging.INFO)
 outputs = {}
-config={"url":"","id":uuid.uuid4(),"orchurl":"","orchcansetconfig":False,"maxsessions":1,"in_process":0}
+config={"url":"","id":uuid.uuid4(),"orchurl":"","orchcansetconfig":False,"maxsessions":1,"in_process":0,"txt2img":True,"img2img":True}
 
 sdr = sdhttp.InternalRequests()
+sdp = sd.StableDiffusionProcessor()
 t = threading.BoundedSemaphore(1)
 
 
 app = Flask(__name__)
 
-#@app.before_request 
-#def check_secret():
-#    if sdr.match_request_secret(request) == False:
-#        return make_response("secret does not match", 500)
 def internal(f):
     @wraps(f)
     def wrap(*args, **kwargs):
@@ -35,7 +33,7 @@ def max_sessions():
         return jsonify({"maxsessions":config["maxsessions"]}), 200
     if request.method == 'POST':
         sessions = request.values.get("sessions")
-        if sessions.isnumeric():
+        if is_number(sessions):
             config["maxsessions"] = int(sessions)
             t = threading.BoundedSemaphore(int(sessions))
             return make_response("Ok", 200)
@@ -60,24 +58,27 @@ def access_token():
 @internal
 def gpu():
     if request.method == 'GET':
-        return jsonify({"device":sd.settings["device"],"gpu":sd.settings["gpu"]}), 200
+        return jsonify({"device":sdp.settings["device"],"gpu":sdp.settings["gpu"]}), 200
     if request.method == 'POST':
         device = request.values.get("device")
         gpu = request.values.get("gpu")
         if device == "cpu":
-            sd.settings["device"] = "cpu"
+            sdp.settings["device"] = "cpu"
         elif device == "cuda":
-            if gpu.isnumeric():
-                sd.settings["device"] = "cuda:"+str(gpu)
-                sd.settings["gpu"] = int(gpu)
+            if is_number(gpu):
+                sdp.settings["device"] = "cuda:"+str(gpu)
+                sdp.settings["gpu"] = int(gpu)
             else:
-                sd.settings["device"] = "cuda:0"
-                sd.settings["gpu"] = 0
+                sdp.settings["device"] = "cuda:0"
+                sdp.settings["gpu"] = 0
         else:
             make_response("device not input correctly: device must be 'cpu' or 'cuda', gpu must be integer.")
         
-        sd.pipe = sd.pipe.to(sd.settings["device"])
-        return make_response("Ok", 200)
+        try:
+            sdp.load_model(config["txt2img"], config["img2img"])
+            return make_response("Ok", 200)
+        except:
+            return make_response("could not change gpu selected", 500)
 
 @app.route("/maximagesize", methods=['GET','POST'])
 @internal
@@ -88,7 +89,7 @@ def max_image_size():
         h = request.values.get("maxheight")
         w = request.values.get("maxwidth")
         
-        if h.isnumeric() and w.isnumeric():
+        if is_number(h) and is_number(w):
             sd.settings["maxheight"] = h
             sd.settings["maxwidth"] = w
             return make_response("max image size set", 200)
@@ -107,9 +108,9 @@ def send_worker_config():
     return jsonify(config), 200
 
 def worker_config():
-    return {**config, **sd.settings}
+    return {**config, **sdp.settings}
 
-@app.route("/txt2img", methods=['GET'])
+@app.route("/txt2img", methods=['POST'])
 @internal
 def txt2img():
     global config
@@ -127,20 +128,31 @@ def txt2img():
     seed = request.values.get("seed").split(",")
     seed_step = int(request.values.get("seedstep"))
     prompt_id = request.headers.get("prompt_id")
+    resp = make_response("",200)
+    
+    images = None
+    seeds = ['']
     if prompt_id == "":
         prompt_id = str(uuid.uuid4())
+    sd_error = False
     try:
         with t:
             #pipe returns [images] and if [nsfw_content_detected]
             config["in_process"] += 1
-            images, nsfw, seeds, is_busy = sd.process_txt2img_prompt(prompt, guidance, iterations, height, width, batch_size, seed, seed_step)
+            images, seeds = sdp.process_txt2img_prompt(prompt, guidance, iterations, height, width, batch_size, seed, seed_step)
     except ValueError as ve:
-        return make_response("image processing busy, please re-submit", 503)
+        resp = make_response("image processing busy, please resubmit", 503)
+    except sd.ModelLoadingError as me:
+        resp = make_response("model loading, please resubmit", 503)
+    except sd.ProcessingError as pe:
+        resp = make_response("image processing had error", 500)
     finally:
         config["in_process"] -= 1
+        if resp.status_code != 200:
+            return resp
     
     if images != None:
-        grid = image_grid(images,1,batch_size)
+        grid = image_grid(images, 1, batch_size)
         grid_with_data = io.BytesIO()
         md = PngInfo()
         md.add_text("SD:prompt", prompt)
@@ -150,11 +162,53 @@ def txt2img():
         grid_with_data.seek(0)
         return sdr.send_file_with_secret(grid_with_data, addl_headers={"prompt_id":prompt_id})
     else:
-        if is_busy == True:
-            return make_response("image processing busy, please re-submit", 503)
-        else:
-            return make_response("image processing failed",500)
+        return make_response("image processing failed",500)
+        
+@app.route("/img2img", methods=['POST'])
+@internal
+def img2img():
+    prompt = request.values.get("prompt")
+    if prompt == "":
+        return make_response("prompt must be specified",400)
     
+    init_img = process_init_img(io.BytesIO(request.files.get("init_img")))
+    if img == None:
+        return make_response("no init_img provided", 400)
+        
+    guidance = float(request.values.get("guidance"))
+    strength = float(request.values.get("strength"))
+    iterations = int(request.values.get("iterations"))
+    batch_size = int(request.values.get("batchsize"))
+    seed = request.values.get("seed")
+    
+    try:
+        with t:
+            config["in_process"] += 1
+            images = sdp.process_img2img_prompt(prompt, init_img, guidance, strength, iterations, batch_size, seed)
+    except ValueError as ve:
+        resp = make_response("image processing busy, please resubmit", 503)
+    except sd.ModelLoadingError as me:
+        resp = make_response("model loading, please resubmit", 503)
+    except sd.ProcessingError as pe:
+        resp = make_response("image processing had error", 500)
+    finally:
+        config["in_process"] -= 1
+        if resp.status_code != 200:
+            return resp
+    
+    if images != None:
+        grid = image_grid(images, 1, batch_size)
+        grid_with_data = io.BytesIO()
+        md = PngInfo()
+        md.add_text("SD:prompt", prompt)
+        md.add_text("SD:prompt_id", prompt_id)
+        md.add_text("SD:seed", seed)
+        grid.save(grid_with_data, pnginfo=md, format="png")
+        grid_with_data.seek(0)
+        return sdr.send_file_with_secret(grid_with_data, addl_headers={"prompt_id":prompt_id})
+    else:
+        return make_response("image processing failed", 500)
+
 def image_grid(imgs, rows, cols):
     app.logger.info("making grid: imgs "+str(len(imgs))+" size "+str(cols))
     
@@ -165,7 +219,11 @@ def image_grid(imgs, rows, cols):
     for i, img in enumerate(imgs):
         grid.paste(img, box=(i%cols*w, i//cols*h))
     return grid
-
+    
+def process_init_img(init_img):
+    init_img = Image.open(init_img).convert("RGB")
+    return init_img.thumbnail((sdp.settings["maxwidth"], sdp.settings["maxheight"]))
+    
 def register_with_orch():
     global config
     app.logger.info("registering with orchestrator: "+config["orchurl"])
@@ -201,44 +259,60 @@ def main(args):
     if args.id != "":
         config["id"] = args.id
     if args.maxsessions > 1:
-        t = threading.BoundedSemaphore(1)
+        t = threading.BoundedSemaphore(args.maxsessions)
     config["orchcansetconfig"] = args.orchcansetconfig
+    config["txt2img"] = args.txt2img
+    config["img2img"] = args.img2img
     #set stable diffusion config
-    sd.settings["gpu"] = args.gpu
-    sd.settings["lowermem"] = args.lowermem
-    sd.settings["slicemem"] = args.slicemem
-    sd.settings["modelpath"] = args.modelpath
-    sd.settings["maxheight"] = args.maxheight
-    sd.settings["maxwidth"] = args.maxwidth
-    sd.settings["accesstoken"] = args.accesstoken
+    sdp.settings["gpu"] = args.gpu
+    sdp.settings["lowermem"] = args.lowermem
+    sdp.settings["slicemem"] = args.slicemem
+    sdp.settings["modelpath"] = args.modelpath
+    sdp.settings["maxheight"] = args.maxheight
+    sdp.settings["maxwidth"] = args.maxwidth
+    sdp.settings["accesstoken"] = args.accesstoken
     if args.device == "cuda":
-        sd.settings["device"] = "cuda:"+str(args.gpu)
+        sdp.settings["device"] = "cuda:"+str(args.gpu)
     
-    app.logger.info("worker config set to:" + str(worker_config()))
-    app.logger.info("stable diffusions settings are: " + str(sd.settings))
+    app.logger.info("worker config set to:" + str(config))
+    app.logger.info("stable diffusions settings are: " + str(sdp.settings))
     
     #load the model
-    sd.load_model()
-    
-    if sd.pipe != None:
-        #register worker with O if specified
-        if args.orchurl != "":
-            config["orchurl"] = args.orchurl
-            if not "https://" in args.orchurl:
-                config["orchurl"] = "https://"+config["orchurl"]
-            if register_with_orch():
-                #start worker registered monitor
-                mw.start()
-            else:
-                return
-        
-        app.logger.info("model loaded, starting web server")
-        if args.ipaddr == "127.0.0.1":
-            app.run(host="127.0.0.1", port=args.port, ssl_context="adhoc", threaded=True)
+    app.logger.info("loading model to "+sdp.settings["device"])
+    sdp.load_model(args.txt2img, args.img2img)
+    t2i_model_loaded, i2i_model_loaded = sdp.models_are_loaded()
+    if args.txt2img:
+        if t2i_model_loaded:
+            app.logger.info("txt2img model loaded")
         else:
-            app.run(host="0.0.0.0", port=args.port, ssl_context="adhoc", threaded=True)
+            app.logger.info("txt2img model not loaded, exiting")
+            return
+        
+    if args.img2img:
+        if i2i_model_loaded:
+            app.logger.info("img2img model loaded")
+        else:
+            app.logger.info("img2img model not loaded, exiting")
+            return
+    
+    #register worker with O if specified
+    if args.orchurl != "":
+        config["orchurl"] = args.orchurl
+        if not "https://" in args.orchurl:
+            config["orchurl"] = "https://"+config["orchurl"]
+        if register_with_orch():
+            #start worker registered monitor
+            mw.start()
+        else:
+            app.logger.info("could not register with orchestrator, exiting")
+            return
+        
+    app.logger.info("model loaded, starting web server")
+    if args.ipaddr == "127.0.0.1":
+        app.run(host="127.0.0.1", port=args.port, ssl_context="adhoc", threaded=True)
     else:
-        app.logger.info("model not loaded, exiting")
+        app.run(host="0.0.0.0", port=args.port, ssl_context="adhoc", threaded=True)
+
 
 
 if __name__=="__main__":
@@ -248,6 +322,8 @@ if __name__=="__main__":
     parser.add_argument("--secret", type=str, action="store", default="stablediffusion")
     parser.add_argument("--slicemem", action="store_true")
     parser.add_argument("--lowermem", action="store_true")
+    parser.add_argument("--txt2img", action="store_true")
+    parser.add_argument("--img2img", action="store_true")
     parser.add_argument("--maxheight", type=int, action="store", default=512)
     parser.add_argument("--maxwidth", type=int, action="store", default=512)
     parser.add_argument("--maxsessions", type=int, action="store", default=1)
