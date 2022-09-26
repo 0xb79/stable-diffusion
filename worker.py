@@ -36,9 +36,9 @@ def max_sessions():
         if is_number(sessions):
             config["maxsessions"] = int(sessions)
             t = threading.BoundedSemaphore(int(sessions))
-            return make_response("Ok", 200)
+            return sdp.make_response_with_secret("Ok", 200)
         else:
-            return make_response("sessions not input as integer", 400)
+            return sdp.make_response_with_secret("sessions not input as integer", 400)
     
 @app.route("/accesstoken", methods=['GET','POST'])
 @internal
@@ -50,9 +50,9 @@ def access_token():
         if token[:2] == "hf" and len(token) == 37:
             sd.config["accesstoken"] = token
             load_model()
-            return make_response("Ok", 200)
+            return sdp.make_response_with_secret("Ok", 200)
         else:
-            return make_response("token not input correctly (start with 'hf' and be 37 characters", 400)
+            return sdp.make_response_with_secret("token not input correctly (start with 'hf' and be 37 characters", 400)
 
 @app.route("/device", methods=['GET','POST'])
 @internal
@@ -72,13 +72,13 @@ def gpu():
                 sdp.settings["device"] = "cuda:0"
                 sdp.settings["gpu"] = 0
         else:
-            make_response("device not input correctly: device must be 'cpu' or 'cuda', gpu must be integer.")
+            sdp.make_response_with_secret("device not input correctly: device must be 'cpu' or 'cuda', gpu must be integer.")
         
         try:
             sdp.load_model(config["txt2img"], config["img2img"])
-            return make_response("Ok", 200)
+            return sdp.make_response_with_secret("Ok", 200)
         except:
-            return make_response("could not change gpu selected", 500)
+            return sdp.make_response_with_secret("could not change gpu selected", 500)
 
 @app.route("/maximagesize", methods=['GET','POST'])
 @internal
@@ -92,9 +92,9 @@ def max_image_size():
         if is_number(h) and is_number(w):
             sd.settings["maxheight"] = h
             sd.settings["maxwidth"] = w
-            return make_response("max image size set", 200)
+            return sdp.make_response_with_secret("max image size set", 200)
         else:
-            return make_response("must input numeric height and width", 400)
+            return sdp.make_response_with_secret("must input numeric height and width", 400)
 
 @app.route("/workerstatus")
 @internal
@@ -116,7 +116,7 @@ def txt2img():
     global config
     prompt = request.values.get("prompt")
     if prompt == "":
-        return make_response("prompt must be specified",400)
+        return sdp.make_response_with_secret("prompt must be specified",400)
     
     app.logger.info("processing txt2img: " + prompt)
     
@@ -128,24 +128,23 @@ def txt2img():
     seed = request.values.get("seed").split(",")
     seed_step = int(request.values.get("seedstep"))
     prompt_id = request.headers.get("prompt_id")
-    resp = make_response("",200)
+    resp = sdp.make_response_with_secret("",200)
     
     images = None
     seeds = ['']
     if prompt_id == "":
         prompt_id = str(uuid.uuid4())
-    sd_error = False
     try:
         with t:
             #pipe returns [images] and if [nsfw_content_detected]
             config["in_process"] += 1
             images, seeds = sdp.process_txt2img_prompt(prompt, guidance, iterations, height, width, batch_size, seed, seed_step)
     except ValueError as ve:
-        resp = make_response("image processing busy, please resubmit", 503)
+        resp = sdp.make_response_w_secret("image processing busy, please resubmit", 503)
     except sd.ModelLoadingError as me:
-        resp = make_response("model loading, please resubmit", 503)
+        resp = sdp.make_response_with_secret("model loading, please resubmit", 503)
     except sd.ProcessingError as pe:
-        resp = make_response("image processing had error", 500)
+        resp = sdp.make_response_with_secret("image processing had error", 500)
     finally:
         config["in_process"] -= 1
         if resp.status_code != 200:
@@ -162,18 +161,18 @@ def txt2img():
         grid_with_data.seek(0)
         return sdr.send_file_with_secret(grid_with_data, addl_headers={"prompt_id":prompt_id})
     else:
-        return make_response("image processing failed",500)
+        return sdp.make_response_with_secret("image processing failed",500)
         
 @app.route("/img2img", methods=['POST'])
 @internal
 def img2img():
     prompt = request.values.get("prompt")
     if prompt == "":
-        return make_response("prompt must be specified",400)
+        return sdp.make_response_with_secret("prompt must be specified",400)
     
     init_img = process_init_img(io.BytesIO(request.files.get("init_img")))
     if img == None:
-        return make_response("no init_img provided", 400)
+        return sdp.make_response_with_secret("no init_img provided", 400)
         
     guidance = float(request.values.get("guidance"))
     strength = float(request.values.get("strength"))
@@ -186,11 +185,11 @@ def img2img():
             config["in_process"] += 1
             images = sdp.process_img2img_prompt(prompt, init_img, guidance, strength, iterations, batch_size, seed)
     except ValueError as ve:
-        resp = make_response("image processing busy, please resubmit", 503)
+        resp = sdp.make_response_with_secret("image processing busy, please resubmit", 503)
     except sd.ModelLoadingError as me:
-        resp = make_response("model loading, please resubmit", 503)
+        resp = sdp.make_response_with_secret("model loading, please resubmit", 503)
     except sd.ProcessingError as pe:
-        resp = make_response("image processing had error", 500)
+        resp = sdp.make_response_with_secret("image processing had error", 500)
     finally:
         config["in_process"] -= 1
         if resp.status_code != 200:
@@ -207,7 +206,7 @@ def img2img():
         grid_with_data.seek(0)
         return sdr.send_file_with_secret(grid_with_data, addl_headers={"prompt_id":prompt_id})
     else:
-        return make_response("image processing failed", 500)
+        return sdp.make_response_with_secret("image processing failed", 500)
 
 def image_grid(imgs, rows, cols):
     app.logger.info("making grid: imgs "+str(len(imgs))+" size "+str(cols))

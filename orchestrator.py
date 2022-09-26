@@ -32,7 +32,7 @@ def manager(f):
             return make_response("secret does not match", 400)
     return wrap
     
-@app.route("/txt2img", methods=['POST'])
+@app.route("/txt2img", methods=['GET','POST'])
 def process_txt2img():
     prompt = request.values.get("prompt")
     app.logger.info("processing txt2img prompt: " + prompt)
@@ -118,7 +118,7 @@ def process_txt2img():
                 
                 return make_response(resp.content, resp.status_code)
             else:
-                app.logger.info("error from worker")
+                app.logger.info("error from worker: "+resp.text)
                 worker_done(worker["id"], True)
                 return make_response("could not process prompt", 500)
         except Exception as ee:

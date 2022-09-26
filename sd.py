@@ -19,6 +19,48 @@ class StableDiffusionProcessor:
         self.scheduler = None
         pass
 
+    def create_latents(self, seed=[''], batch_size=1, seed_step=0, height=512, width=512):
+        generator = torch.Generator(device=self.settings["device"])
+        latents = None
+        seeds = []
+        seed = [] if seed == [''] else seed #set seed to zero length if none provided
+        if len(seed) > 0:
+            for s in seed:
+                generator.manual_seed(int(s))
+                seeds.append(int(s))
+                
+                image_latents = torch.randn(
+                                (1, self.t2i_pipe.unet.in_channels, height // 8, width // 8),
+                                generator = generator,
+                                device = self.settings["device"]
+                                )
+                latents = image_latents if latents is None else torch.cat((latents, image_latents))
+        
+        if batch_size > len(seed):
+            addl = batch_size - len(seed)
+            for _ in range(addl):
+                if seed_step == 0 or seed == []:
+                    # Get a new random seed, store it and use it as the generator state
+                    s = generator.seed()
+                    seeds.append(s)
+                else:
+                    #update the seed by the step
+                    s = generator.manual_seed(int(seed[-1])+int(seed_step))
+                    seeds.append(s)
+                
+                image_latents = torch.randn(
+                    (1, self.t2i_pipe.unet.in_channels, height // 8, width // 8),
+                    generator = generator,
+                    device = self.settings["device"]
+                )
+                latents = image_latents if latents is None else torch.cat((latents, image_latents))
+        
+        return latents, seeds
+        
+    def torch_gc(self):
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
+    
     def process_txt2img_prompt(self, prompt='', guidance=7.5, iterations=50, height=512, width=512, batch_size=1, seed=[''], seed_step=0):
         if self.lock.locked():
             raise ModelLoadingError
@@ -93,44 +135,6 @@ class StableDiffusionProcessor:
         else:
             return None
 
-    def create_latents(self, seed=[''], batch_size=1, seed_step=0, height=512, width=512):
-        generator = torch.Generator(device=self.settings["device"])
-        latents = None
-        seeds = []
-        seed = [] if seed == [''] else seed #set seed to zero length if none provided
-        if len(seed) > 0:
-            for s in seed:
-                generator.manual_seed(int(s))
-                seeds.append(int(s))
-                
-                image_latents = torch.randn(
-                                (1, self.t2i_pipe.unet.in_channels, height // 8, width // 8),
-                                generator = generator,
-                                device = self.settings["device"]
-                                )
-                latents = image_latents if latents is None else torch.cat((latents, image_latents))
-        
-        if batch_size > len(seed):
-            addl = batch_size - len(seed)
-            for _ in range(addl):
-                if seed_step == 0 or seed == []:
-                    # Get a new random seed, store it and use it as the generator state
-                    s = generator.seed()
-                    seeds.append(s)
-                else:
-                    #update the seed by the step
-                    s = generator.manual_seed(int(seed[-1])+int(seed_step))
-                    seeds.append(s)
-                
-                image_latents = torch.randn(
-                    (1, self.t2i_pipe.unet.in_channels, height // 8, width // 8),
-                    generator = generator,
-                    device = self.settings["device"]
-                )
-                latents = image_latents if latents is None else torch.cat((latents, image_latents))
-        
-        return latents, seeds
-        
     def load_model(self, t2i=True, i2i=True):
         if self.lock.locked():
             raise ModelLoadingError
@@ -206,6 +210,4 @@ class StableDiffusionProcessor:
     def models_are_loaded(self):
         return self.t2i_pipe != None, self.i2i_pipe != None
         
-    def torch_gc(self):
-        torch.cuda.empty_cache()
-        torch.cuda.ipc_collect()
+    
