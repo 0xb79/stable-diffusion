@@ -15,7 +15,7 @@ class StableDiffusionProcessor:
         self.lock = Lock()
         self.t2i_pipe = None
         self.i2i_pipe = None
-        self.settings = {"accesstoken":"","modelpath":"","slicemem":False,"lowermem":False,"maxheight":512,"maxwidth":512,"device":"cpu","gpu":0,"maxbatchsize":5}
+        self.settings = {"accesstoken":"","modelpath":"","slicemem":False,"lowermem":False,"maxheight":512,"maxwidth":512,"device":"cpu","gpu":0,"maxbatchsize":1}
         self.scheduler = None
         pass
 
@@ -76,13 +76,15 @@ class StableDiffusionProcessor:
             prompt = [prompt] * batch_size
             if torch.cuda.is_available() and "cuda" in self.settings["device"]:
                 with torch.autocast("cuda"):
-                    latents, seeds = create_latents(seed, batch_size, seed_step, height, width)
-                    output = t2i_pipe(prompt, guidance_scale=guidance, num_inferenece_steps=iterations, height=height, width=width, latents=latents)
+                    latents, seeds = self.create_latents(seed, batch_size, seed_step, height, width)
+                    output = self.t2i_pipe(prompt, guidance_scale=guidance, num_inferenece_steps=iterations, height=height, width=width, latents=latents)
             else:
                 with torch.autocast("cpu"):
                     latents, seeds = create_latents(seed, batch_size, seed_step, height, width)
-                    output = t2i_pipe(prompt, guidance_scale=guidance, num_inferenece_steps=iterations, height=height, width=width, latents=latents)
+                    output = self.t2i_pipe(prompt, guidance_scale=guidance, num_inferenece_steps=iterations, height=height, width=width, latents=latents)
         except RuntimeError as re:
+            exc_type, exc_obj, exc_tb = sys.exc_info()
+            fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
             print("stable diffusion processing had error")
             print(exc_type, fname, exc_tb.tb_lineno)
             raise ProcessingError
@@ -93,7 +95,7 @@ class StableDiffusionProcessor:
             print(traceback.format_exc())
             raise ProcessingError
         finally:
-            torch_gc()
+            self.torch_gc()
         
         if output != None:
             return output.images, seeds
@@ -116,7 +118,7 @@ class StableDiffusionProcessor:
             prompt = [prompt] * batch_size
             if torch.cuda.is_available() and "cuda" in self.settings["device"]:
                 with torch.autocast("cuda"):
-                    output = i2i_pipe(prompt, init_image=init_img, strength=strength, guidance_scale=guidance, num_inferenece_steps=iterations, generator=generator)
+                    output = self.i2i_pipe(prompt, init_image=init_img, strength=strength, guidance_scale=guidance, num_inferenece_steps=iterations, generator=generator)
         except RuntimeError as re:
             print("stable diffusion processing had error")
             print(exc_type, fname, exc_tb.tb_lineno)
@@ -128,7 +130,7 @@ class StableDiffusionProcessor:
             print(traceback.format_exc())
             raise ProcessingError
         finally:
-            torch_gc()
+            self.torch_gc()
         
         if output != None:
             return output.images

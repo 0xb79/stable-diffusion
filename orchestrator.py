@@ -284,6 +284,7 @@ def select_worker(sort_by):
             workers[id]["load"] += 1
             return sort_workers[w]['config']
     
+    app.logger.info("no worker selected, all workers busy")
     return None
 
 def worker_done(id, iserror=False, resp_time=0):
