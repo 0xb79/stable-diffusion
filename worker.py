@@ -237,7 +237,7 @@ def register_with_orch():
 def monitor_worker_registered():
     global config
     while True:
-        resp = sdr.get(config["orchurl"]+"/workerisregistered/"+config["id"])
+        resp = sdr.get(config["orchurl"]+"/workerisregistered/"+str(config["id"]))
         if resp.status_code == 400:
             app.logger.info("re-registering with orch")
             register_with_orch()
@@ -277,6 +277,8 @@ def main(args):
     #load the model
     app.logger.info("loading model to "+sdp.settings["device"])
     sdp.load_model(args.txt2img, args.img2img)
+    
+    
     t2i_model_loaded, i2i_model_loaded = sdp.models_are_loaded()
     if args.txt2img:
         if t2i_model_loaded:

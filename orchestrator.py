@@ -26,7 +26,7 @@ def internal(f):
 def manager(f):
     @wraps(f)
     def wrap(*args, **kwargs):
-        if request.environ.get("HTTP_CREDENTIALS","") == config["managesecret"]:
+        if "Credentials" in request.headers and request.headers["Credentials"] == config["managesecret"]:
             return f(*args, **kwargs)
         else:
             return make_response("secret does not match", 400)
@@ -106,7 +106,7 @@ def process_txt2img():
             resp = sdr.post(worker['url']+"/txt2img",headers={"prompt_id":prompt_id},params={"prompt":prompt,"batchsize":batch_size,"guidance":guidance,"iterations":iterations,"height":height,"width":width,"seed":seed, "seedstep":seed_step})
         
             if resp.status_code == 200:
-                app.logger.info("image received from worker")
+                app.logger.info("image received from worker "+str(worker["id"]))
                 took = int(time.time() - start)
                 worker_done(worker["id"], resp_time=took)
                 
@@ -122,6 +122,7 @@ def process_txt2img():
                 worker_done(worker["id"], True)
                 return make_response("could not process prompt", 500)
         except Exception as ee:
+            worker_done(worker["id"], True)
             return make_response("could not process prompt", 500)
     else:
         app.logger.info("no worker available")
@@ -201,7 +202,9 @@ def process_img2img():
                 worker_done(worker["id"], True)
                 return make_response("could not process prompt", 500)
         except Exception as ee:
+            worker_done(worker["id"], True)
             return make_response("could not process prompt", 500)
+            
     else:
         app.logger.info("no worker available")
         return make_response("no workers available",503)
@@ -239,7 +242,7 @@ def worker_is_registered(id):
         else:
             return sdr.make_response_with_secret("worker id already registered a differnet ip address",404)
     else:
-        app.logger.info("worker "+id+" not registered, expecting registration request")
+        app.logger.info("worker "+str(id)+" not registered, expecting registration request")
         return sdr.make_response_with_secret("",400)
 
 def monitor_workers():
@@ -251,13 +254,13 @@ def monitor_workers():
             for w in workers.keys():
                 resp = sdr.get(workers[w]["config"]["url"]+"/workerstatus")
                 if resp.status_code == 200:
-                    if resp.text.isnumeric():
+                    if is_number(resp.text):
                         if workers[w]["load"] != int(resp.text):
-                            app.logger.info("worker reported different in process prompts: worker="+resp.text+" orch="+workers[w]["load"]+". updated to worker reported load")
+                            app.logger.info("worker reported different in process prompts: worker="+resp.text+" orch="+str(workers[w]["load"])+". updated to worker reported load")
                             workers[w]["load"] = int(resp.text)
                     workers[w]["last_status_check"] = time.time()
                 else:
-                    app.logger.info("worker "+w+" did not respond, removing")
+                    app.logger.info("worker "+str(w)+" did not respond, removing")
                     del_workers.append(w)
             
             for d in del_workers:
@@ -381,7 +384,7 @@ if __name__=="__main__":
     parser.add_argument("--port", type=str, action="store", default="5555")
     parser.add_argument("--secret", type=str, action="store", default="stablediffusion")
     parser.add_argument("--noselfsignedcert", type=bool, action="store", default=False)
-    parser.add_argument("--managesecret", type=str, action="store", default="")
+    parser.add_argument("--managesecret", type=str, action="store", default="manage")
     args = parser.parse_args()
     
     main(args)

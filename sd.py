@@ -38,6 +38,7 @@ class StableDiffusionProcessor:
         
         if batch_size > len(seed):
             addl = batch_size - len(seed)
+            last_seed = int(seed[-1])
             for _ in range(addl):
                 if seed_step == 0 or seed == []:
                     # Get a new random seed, store it and use it as the generator state
@@ -45,14 +46,14 @@ class StableDiffusionProcessor:
                     seeds.append(s)
                 else:
                     #update the seed by the step
-                    s = generator.manual_seed(int(seed[-1])+int(seed_step))
+                    s = generator.manual_seed(last_seed+int(seed_step))
                     seeds.append(s)
                 
                 image_latents = torch.randn(
-                    (1, self.t2i_pipe.unet.in_channels, height // 8, width // 8),
-                    generator = generator,
-                    device = self.settings["device"]
-                )
+                                (1, self.t2i_pipe.unet.in_channels, height // 8, width // 8),
+                                generator = generator,
+                                device = self.settings["device"]
+                                )
                 latents = image_latents if latents is None else torch.cat((latents, image_latents))
         
         return latents, seeds
@@ -140,7 +141,6 @@ class StableDiffusionProcessor:
     def load_model(self, t2i=True, i2i=True):
         if self.lock.locked():
             raise ModelLoadingError
-            
         try:
             self.lock.acquire()
             self.t2i_pipe = None
@@ -156,6 +156,7 @@ class StableDiffusionProcessor:
             model = "CompVis/stable-diffusion-v1-4" if self.settings["modelpath"] == "" else self.settings["modelpath"]
             if not self.settings["lowermem"]:
                 if t2i:
+                    print("loading txt2img")
                     self.t2i_pipe = StableDiffusionPipeline.from_pretrained(
                         model, 
                         scheduler = self.scheduler,
@@ -203,9 +204,9 @@ class StableDiffusionProcessor:
                     self.t2i_pipe = self.t2i_pipe.to("cpu")
                 if i2i:
                     self.i2i_pipe = self.i2i_pipe.to("cpu")
-        except Exception as e: 
-            print(e)
-            print("could not load model, make sure accesstoken or modelpath is set")
+        except Exception as ee:
+            print(ee)
+            print("model not loaded, error on loading")
         finally:
             self.lock.release()
     
