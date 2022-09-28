@@ -124,9 +124,9 @@ def txt2img():
     iterations = int(request.values.get("iterations"))
     height = int(request.values.get("height"))
     width = int(request.values.get("width"))
-    batch_size = int(request.values.get("batchsize"))
+    batchsize = int(request.values.get("batchsize"))
     seed = request.values.get("seed").split(",")
-    seed_step = int(request.values.get("seedstep"))
+    seedstep = int(request.values.get("seedstep"))
     prompt_id = request.headers.get("prompt_id")
     resp = sdr.make_response_with_secret("",200)
     
@@ -137,7 +137,7 @@ def txt2img():
     try:
         with t:
             config["in_process"] += 1
-            images, seeds = sdp.process_txt2img_prompt(prompt, guidance, iterations, height, width, batch_size, seed, seed_step)
+            images, seeds = sdp.process_txt2img_prompt(prompt, guidance, iterations, height, width, batchsize, seed, seedstep)
     except ValueError as ve:
         resp = sdr.make_response_with_secret("image processing busy, please resubmit", 503)
     except sd.ModelLoadingError as me:
@@ -150,7 +150,7 @@ def txt2img():
             return resp
     
     if images != None:
-        grid = image_grid(images, 1, batch_size)
+        grid = image_grid(images, 1, batchsize)
         grid_with_data = io.BytesIO()
         md = PngInfo()
         md.add_text("SD:prompt", prompt)
@@ -176,13 +176,13 @@ def img2img():
     guidance = float(request.values.get("guidance"))
     strength = float(request.values.get("strength"))
     iterations = int(request.values.get("iterations"))
-    batch_size = int(request.values.get("batchsize"))
+    batchsize = int(request.values.get("batchsize"))
     seed = request.values.get("seed")
     
     try:
         with t:
             config["in_process"] += 1
-            images = sdp.process_img2img_prompt(prompt, init_img, guidance, strength, iterations, batch_size, seed)
+            images = sdp.process_img2img_prompt(prompt, init_img, guidance, strength, iterations, batchsize, seed)
     except ValueError as ve:
         resp = sdr.make_response_with_secret("image processing busy, please resubmit", 503)
     except sd.ModelLoadingError as me:
@@ -195,7 +195,7 @@ def img2img():
             return resp
     
     if images != None:
-        grid = image_grid(images, 1, batch_size)
+        grid = image_grid(images, 1, batchsize)
         grid_with_data = io.BytesIO()
         md = PngInfo()
         md.add_text("SD:prompt", prompt)

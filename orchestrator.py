@@ -72,25 +72,25 @@ def process_txt2img():
     else:
         width = 512
     
-    batch_size = request.values.get("batchsize")
-    if batch_size != None:
-        if is_number(batch_size) == False:
+    batchsize = request.values.get("batchsize")
+    if batchsize != None:
+        if is_number(batchsize) == False:
             return make_response("need to input numeric batchsize", 400)
     else:
-        batch_size = 1
+        batchsize = 1
     
     seed = request.values.get("seed")
     if seed == None:
         seed = ''
     
-    seed_step = request.values.get("seedstep")
-    if seed_step != None:
-        if is_number(seed_step) == False:
+    seedstep = request.values.get("seedstep")
+    if seedstep != None:
+        if is_number(seedstep) == False:
             return make_response("need to input numeric seedstep", 400)
         else:
-            seed_step = 1
+            seedstep = 1
     else:
-        seed_step = 1
+        seedstep = 1
     
     #select worker to send to
     if len(workers) == 0:
@@ -103,7 +103,7 @@ def process_txt2img():
         app.logger.info("worker selected: "+worker["id"])
         start = time.time()
         try:
-            resp = sdr.post(worker['url']+"/txt2img",headers={"prompt_id":prompt_id},params={"prompt":prompt,"batchsize":batch_size,"guidance":guidance,"iterations":iterations,"height":height,"width":width,"seed":seed, "seedstep":seed_step})
+            resp = sdr.post(worker['url']+"/txt2img",headers={"prompt_id":prompt_id},params={"prompt":prompt,"batchsize":batchsize,"guidance":guidance,"iterations":iterations,"height":height,"width":width,"seed":seed, "seedstep":seedstep})
         
             if resp.status_code == 200:
                 app.logger.info("image received from worker "+str(worker["id"]))
@@ -165,12 +165,12 @@ def process_img2img():
     if seed == None:
         seed = ''
     
-    batch_size = request.values.get("batchsize")
-    if batch_size != None:
-        if is_number(batch_size) == False:
+    batchsize = request.values.get("batchsize")
+    if batchsize != None:
+        if is_number(batchsize) == False:
             return make_response("need to input numeric batchsize", 400)
     else:
-        batch_size = 1
+        batchsize = 1
     
     #select worker to send to
     if len(workers) == 0:
@@ -183,7 +183,7 @@ def process_img2img():
         app.logger.info("worker selected: "+worker["id"])
         start = time.time()
         try:
-            resp = sdr.get(worker['url']+"/img2img",headers={"prompt_id":prompt_id},params={"prompt":prompt,"batchsize":batch_size,"guidance":guidance,"strength":strength,"iterations":iterations, "seed":seed})
+            resp = sdr.get(worker['url']+"/img2img",headers={"prompt_id":prompt_id},params={"prompt":prompt,"batchsize":batchsize,"guidance":guidance,"strength":strength,"iterations":iterations, "seed":seed})
         
             if resp.status_code == 200:
                 app.logger.info("image received from worker")

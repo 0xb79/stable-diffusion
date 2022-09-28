@@ -19,11 +19,12 @@ class StableDiffusionProcessor:
         self.scheduler = None
         pass
 
-    def create_latents(self, seed=[''], batch_size=1, seed_step=0, height=512, width=512):
+    def create_latents(self, seed=[''], batchsize=1, seedstep=0, height=512, width=512):
         generator = torch.Generator(device=self.settings["device"])
         latents = None
         seeds = []
         seed = [] if seed == [''] else seed #set seed to zero length if none provided
+        image_latents = []
         if len(seed) > 0:
             for s in seed:
                 generator.manual_seed(int(s))
@@ -36,18 +37,21 @@ class StableDiffusionProcessor:
                                 )
                 latents = image_latents if latents is None else torch.cat((latents, image_latents))
         
-        if batch_size > len(seed):
-            addl = batch_size - len(seed)
-            last_seed = int(seed[-1])
+        if batchsize > len(seed):
+            addl = batchsize - len(seed)
+            last_seed = 0 if len(seed) == 0 else seed[-1]
+            
             for _ in range(addl):
-                if seed_step == 0 or seed == []:
+                if seedstep == 0 or seed == []:
                     # Get a new random seed, store it and use it as the generator state
                     s = generator.seed()
                     seeds.append(s)
                 else:
                     #update the seed by the step
-                    s = generator.manual_seed(last_seed+int(seed_step))
+                    new_seed = last_seed+int(seedstep)
+                    s = generator.manual_seed(new_seed)
                     seeds.append(s)
+                    last_seed = new_seed
                 
                 image_latents = torch.randn(
                                 (1, self.t2i_pipe.unet.in_channels, height // 8, width // 8),
@@ -62,26 +66,26 @@ class StableDiffusionProcessor:
         torch.cuda.empty_cache()
         torch.cuda.ipc_collect()
     
-    def process_txt2img_prompt(self, prompt='', guidance=7.5, iterations=50, height=512, width=512, batch_size=1, seed=[''], seed_step=0):
+    def process_txt2img_prompt(self, prompt='', guidance=7.5, iterations=50, height=512, width=512, batchsize=1, seed=[''], seedstep=0):
         if self.lock.locked():
             raise ModelLoadingError
             
         height = min(self.settings["maxheight"], int(height))
         width = min(self.settings["maxwidth"], int(width))
-        batch_size = min(self.settings["maxbatchsize"], int(batch_size))
+        batchsize = min(self.settings["maxbatchsize"], int(batchsize))
         
         output = None
         latents = None
         seeds = None
         try:
-            prompt = [prompt] * batch_size
+            prompt = [prompt] * batchsize
             if torch.cuda.is_available() and "cuda" in self.settings["device"]:
                 with torch.autocast("cuda"):
-                    latents, seeds = self.create_latents(seed, batch_size, seed_step, height, width)
+                    latents, seeds = self.create_latents(seed, batchsize, seedstep, height, width)
                     output = self.t2i_pipe(prompt, guidance_scale=guidance, num_inferenece_steps=iterations, height=height, width=width, latents=latents)
             else:
                 with torch.autocast("cpu"):
-                    latents, seeds = create_latents(seed, batch_size, seed_step, height, width)
+                    latents, seeds = create_latents(seed, batchsize, seedstep, height, width)
                     output = self.t2i_pipe(prompt, guidance_scale=guidance, num_inferenece_steps=iterations, height=height, width=width, latents=latents)
         except RuntimeError as re:
             exc_type, exc_obj, exc_tb = sys.exc_info()
@@ -104,7 +108,7 @@ class StableDiffusionProcessor:
             return None, None
             
 
-    def process_img2img_prompt(self, prompt, init_img=None, guidance=7.5, strength=.75, iterations=50, batch_size=1, seed=''):
+    def process_img2img_prompt(self, prompt, init_img=None, guidance=7.5, strength=.75, iterations=50, batchsize=1, seed=''):
         if self.lock.locked():
             raise ModelLoadingError
         
@@ -116,7 +120,7 @@ class StableDiffusionProcessor:
         output = None
         
         try:
-            prompt = [prompt] * batch_size
+            prompt = [prompt] * batchsize
             if torch.cuda.is_available() and "cuda" in self.settings["device"]:
                 with torch.autocast("cuda"):
                     output = self.i2i_pipe(prompt, init_image=init_img, strength=strength, guidance_scale=guidance, num_inferenece_steps=iterations, generator=generator)
