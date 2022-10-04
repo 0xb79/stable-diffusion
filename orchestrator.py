@@ -1,18 +1,24 @@
 from flask import Flask, request, send_file, Response, make_response, jsonify
+from flask_executor import Executor
 from torch import autocast, cuda
 from functools import wraps
-import sys, os, io, logging, uuid, torch, requests, argparse, json, time, copy, threading
+from PIL import Image
+import sys, os, io, logging, uuid, torch, requests, argparse, json, time, copy, threading, asyncio, datetime, pathlib
 from diffusers import StableDiffusionPipeline, LMSDiscreteScheduler
 import sdhttp
 from helpers import is_number
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(format='%(asctime)s - %(levelname)s - %(module)s:%(lineno)d - %(message)s',level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-app = Flask(__name__)
-
-config = {"sort_workers_by":"load","managesecret":""}
+config = {"sort_workers_by":"load","managesecret":"","maxsessions":10,"datadir":""}
 sdr = sdhttp.InternalRequests()
 workers = {}
+
+app = Flask(__name__)
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1000 * 1000 #limit to 16 megabytes
+
+root_dir = os.path.dirname(os.path.abspath(__file__))
 
 def internal(f):
     @wraps(f)
@@ -20,7 +26,7 @@ def internal(f):
         if "Credentials" in request.headers and sdr.match_request_secret(request):
             return f(*args, **kwargs)
         else:
-            return make_response("secret does not match", 400)
+            return make_response("secret does not match", 401)
     return wrap
     
 def manager(f):
@@ -29,11 +35,20 @@ def manager(f):
         if "Credentials" in request.headers and request.headers["Credentials"] == config["managesecret"]:
             return f(*args, **kwargs)
         else:
-            return make_response("secret does not match", 400)
+            return make_response("secret does not match", 401)
     return wrap
     
+def timed(f):
+    @wraps(f)
+    def wrap(*a, **k):
+        then = time.time()
+        res = f(*a, **k)
+        elapsed = time.time() - then
+        return elapsed, res
+    return wrap
+
 @app.route("/txt2img", methods=['GET','POST'])
-def process_txt2img():
+def start_process_txt2img():
     prompt = request.values.get("prompt")
     app.logger.info("processing txt2img prompt: " + prompt)
     if (prompt == None or prompt == ""):
@@ -92,44 +107,32 @@ def process_txt2img():
     else:
         seedstep = 1
     
+    
     #select worker to send to
     if len(workers) == 0:
         return make_response("no workers registered", 500)
         
     req = request.full_path
     prompt_id = str(uuid.uuid4())
-    worker = select_worker('load')
+    worker = select_worker(config["sort_workers_by"], prompt_id)
     if worker != None:
         app.logger.info("worker selected: "+worker["id"])
-        start = time.time()
-        try:
-            resp = sdr.post(worker['url']+"/txt2img",headers={"prompt_id":prompt_id},params={"prompt":prompt,"batchsize":batchsize,"guidance":guidance,"iterations":iterations,"height":height,"width":width,"seed":seed, "seedstep":seedstep})
-        
-            if resp.status_code == 200:
-                app.logger.info("image received from worker "+str(worker["id"]))
-                took = int(time.time() - start)
-                worker_done(worker["id"], resp_time=took)
-                
-                img = io.BytesIO(resp.content)
-                return send_file(img, mimetype='image/png',download_name=prompt_id+".png")
-            elif resp.status_code == 503:
-                app.logger.info("worker busy")
-                worker_done(worker["id"])
-                
-                return make_response(resp.content, resp.status_code)
-            else:
-                app.logger.info("error from worker: "+resp.text)
-                worker_done(worker["id"], True)
-                return make_response("could not process prompt", 500)
-        except Exception as ee:
-            worker_done(worker["id"], True)
-            return make_response("could not process prompt", 500)
+        resp = sdr.post(url=worker['url']+"/txt2img", headers={"prompt_id":prompt_id}, data={"prompt":prompt,"batchsize":batchsize,"guidance":guidance,"iterations":iterations,"height":height,"width":width,"seed":seed, "seedstep":seedstep})
+        if resp.status_code == 200:
+            app.logger.info(prompt_id+": txt2img: worker "+worker["id"]+" accepted prompt")
+            return make_response(prompt_id, 200)
+        elif resp.status_code == 503:
+            app.logger.info(prompt_id+": txt2img: worker "+worker["id"]+" capped")
+            return make_response("no workers available", 503)
+        else:
+            app.logger.info(prompt_id+": txt2img: worker "+worker["id"]+" error")
+            return make_response("error from worker", 500)
     else:
         app.logger.info("no worker available")
-        return make_response("no workers available",503)
-
-@app.route("/img2img", methods=['POST'])
-def process_img2img():
+        return make_response("no workers available", 503)
+    
+@app.route("/img2img", methods=['GET', 'POST'])
+def start_process_img2img():
     prompt = request.values.get("prompt")
     app.logger.info("processing img2img prompt: " + prompt)
     if (prompt == None or prompt == ""):
@@ -178,72 +181,97 @@ def process_img2img():
         
     req = request.full_path
     prompt_id = str(uuid.uuid4())
-    worker = select_worker('load')
+    worker = select_worker(config["sort_workers_by"], prompt_id)
     if worker != None:
         app.logger.info("worker selected: "+worker["id"])
-        start = time.time()
-        try:
-            resp = sdr.get(worker['url']+"/img2img",headers={"prompt_id":prompt_id},params={"prompt":prompt,"batchsize":batchsize,"guidance":guidance,"strength":strength,"iterations":iterations, "seed":seed})
-        
-            if resp.status_code == 200:
-                app.logger.info("image received from worker")
-                took = int(time.time() - start)
-                worker_done(worker["id"], resp_time=took)
-                
-                img = io.BytesIO(resp.content)
-                return send_file(img, mimetype='image/png',download_name=prompt_id+".png")
-            elif resp.status_code == 503:
-                app.logger.info("worker busy")
-                worker_done(worker["id"])
-                
-                return make_response(resp.content, resp.status_code)
-            else:
-                app.logger.info("error from worker")
-                worker_done(worker["id"], True)
-                return make_response("could not process prompt", 500)
-        except Exception as ee:
-            worker_done(worker["id"], True)
-            return make_response("could not process prompt", 500)
-            
+        resp = sdr.post(url=worker['url']+"/img2img",headers={"prompt_id":prompt_id},params={"prompt":prompt,"batchsize":batchsize,"guidance":guidance,"strength":strength,"iterations":iterations, "seed":seed})
+        if resp.status_code == 200:
+            app.logger.info(prompt_id+": img2img: worker "+worker["config"]["id"]+" accepted prompt")
+            return make_response(prompt_id, 200)
+        elif resp.status_code == 503:
+            app.logger.info(prompt_id+": img2img: worker "+worker["config"]["id"]+" capped")
+            return make_response("no workers available", 503)
+        else:
+            app.logger.info(prompt_id+": img2img: worker "+worker["config"]["id"]+" error")
+            return make_response("error from worker", 500)
     else:
         app.logger.info("no worker available")
-        return make_response("no workers available",503)
+        return make_response("no workers available", 503)
         
-@app.route("/registerworker", methods=['POST'])
+
+@app.route("/results/<prompt_id>", methods=['GET'])
+def send_results(prompt_id):
+    pf = prompt_results_file(prompt_id)
+    if os.path.isfile(pf):
+        return send_file(pf, mimetype='image/png')
+    else:
+        #return 
+        for w in workers:
+            for p in workers[w][load]:
+                if p[0] == prompt_id:
+                    return make_response("prompt results not available, still in process", 204)
+        #prompt not available and not in process
+        return make_response("prompt results not available", 404)
+
 @internal
+@app.route("/resultsfromworker/<prompt_id>", methods=['POST'])
+def results_from_worker(prompt_id):
+    if len(request.files) > 0:
+        try:
+            worker_done(prompt_id, time.time(), False)
+            img = Image.open(request.files['img'].stream)
+            #img.verify()
+            save_to = prompt_results_file(prompt_id)
+            app.logger.info("saving image to: "+save_to)
+            img.save(prompt_results_file(prompt_id), format="png")
+            app.logger.info(prompt_id+": results received and saved")
+            return sdr.send_response_with_secret("results received", 200)
+        except Exception as ee:
+            app.logger.error("error", exc_info=True)
+            return sdr.send_response_with_secret("image is not valid", 400)
+    else:
+        app.logger.info(prompt_id+": no files received")
+        worker_done(prompt_id, time.time(), True)  #no file received, worker had error
+        return sdr.send_response_with_secret("no files attached", 400)
+
+def prompt_results_file(prompt_id):
+    return os.path.join(config["datadir"],prompt_id+".png")
+    
+@internal
+@app.route("/registerworker", methods=['POST'])
 def register_worker():
     global workers
     w_config = request.get_json()
     w_ip = worker_ip(request)
     app.logger.info("worker registration received: "+str(w_config))
-    if w_config["url"] == "":
-        resp = sdr.make_response_with_secret('url must be set',404)
-        return resp
-    else:
+    if w_config["url"] != "":
         if w_config["id"] in workers.keys():
             if workers[w_config["id"]]["remote_addr"] != w_ip:
                 app.logger.info("worker id ("+w_config["id"]+") already registered at different ip address")
-                return sdr.make_response_with_secret('id already in use',400)
+                return sdr.send_response_with_secret('id already in use', 404)
         
-        workers[w_config["id"]] = {'config':w_config,'load':0,'score':[], 'resp_time':[], 'error_cnt':0, "remote_addr":w_ip, "last_checkin":0,"last_status_check":0}
+        workers[w_config["id"]] = {'config':w_config,'load':[],'score':[], 'resp_time':[], 'error_cnt':0, "remote_addr":w_ip, "last_checkin":0,"last_status_check":0}
         app.logger.info("worker registered  (id: "+w_config["id"]+")")
-        resp = sdr.make_response_with_secret('worker registered',200)
+        resp = sdr.send_response_with_secret('worker registered', 200)
+        return resp
+    else:
+        resp = sdr.send_response_with_secret('url must be set', 400)
         return resp
 
-@app.route("/workerisregistered/<id>", methods=['GET'])
 @internal
+@app.route("/workerisregistered/<id>", methods=['GET'])
 def worker_is_registered(id):
     global workers
     w_ip = worker_ip(request)
     if id in workers.keys():
         if workers[id]["remote_addr"] == w_ip:
             workers[id]["last_checkin"] = time.time()
-            return sdr.make_response_with_secret("",200)
+            return sdr.send_response_with_secret("",200)
         else:
-            return sdr.make_response_with_secret("worker id already registered a differnet ip address",404)
+            return sdr.send_response_with_secret("worker id already registered with a differnet ip address",404)
     else:
         app.logger.info("worker "+str(id)+" not registered, expecting registration request")
-        return sdr.make_response_with_secret("",400)
+        return sdr.send_response_with_secret("",400)
 
 def monitor_workers():
     global workers
@@ -254,15 +282,19 @@ def monitor_workers():
             for w in workers.keys():
                 resp = sdr.get(workers[w]["config"]["url"]+"/workerstatus")
                 if resp.status_code == 200:
-                    if is_number(resp.text):
-                        if workers[w]["load"] != int(resp.text):
-                            app.logger.info("worker reported different in process prompts: worker="+resp.text+" orch="+str(workers[w]["load"])+". updated to worker reported load")
-                            workers[w]["load"] = int(resp.text)
                     workers[w]["last_status_check"] = time.time()
+                    for p in workers[w]["load"]:
+                        start = p[1]
+                        #remove prompt process if not responsed in 20 minutes
+                        if time.time() > (start + 1200):
+                            prompt_id = p[0]
+                            app.logger.info(prompt_id+": did not return results in 20 minutes, removing")
+                            workers[w]["load"].pop(p)
                 else:
                     app.logger.info("worker "+str(w)+" did not respond, removing")
                     del_workers.append(w)
-            
+                    #TODO: add job resubmit logic if a worker went offline with jobs in process
+                    
             for d in del_workers:
                 remove_worker(d)
         except Exception as ee:
@@ -272,38 +304,48 @@ def monitor_workers():
 def worker_ip(req):
     return request.environ.get('HTTP_X_REAL_IP', request.remote_addr)
     
-def select_worker(sort_by):
+def select_worker(sort_by, prompt_id):
+    global workers
     sort_workers = {}
     if sort_by == 'load':
-        sort_workers = dict(sorted(workers.items(), key=lambda x: x[1]['load'], reverse=False))
+        sort_workers = dict(sorted(workers.items(), key=lambda x: len(x[1]['load']), reverse=False))
     elif sort_by == 'score':
         sort_workers = dict(sorted(workers.items(), key=lambda x: x[1]['score'], reverse=True))
     elif sort_by == 'error_cnt':
         sort_workers = dict(sorted(workers.items(), key=lambda x: x[1]['error_cnt'], reverse=False))
     
     for w in sort_workers.keys():
-        if sort_workers[w]['config']['maxsessions'] > sort_workers[w]['load']:
+        if sort_workers[w]['config']['maxsessions'] > len(sort_workers[w]['load']):
             id = sort_workers[w]['config']['id']
-            workers[id]["load"] += 1
+            workers[id]["load"].append((prompt_id,time.time()))
             return sort_workers[w]['config']
     
     app.logger.info("no worker selected, all workers busy")
     return None
 
-def worker_done(id, iserror=False, resp_time=0):
+def worker_done(prompt_id, rec_time=0, iserror=False):
     #update load to remove prompt
-    workers[id]["load"] -= 1
-    #record error
-    if iserror:
-        workers[id]["error_cnt"] += 1
-    #track response time and score (based on 30 second response time)
-    if resp_time > 0:
-        if len(workers[id]["resp_time"]) == 10:
-            workers[id]["resp_time"].pop(0)
-        workers[id]["resp_time"].append(resp_time)
-        if len(workers[id]["score"]) == 10:
-            workers[id]["score"].pop(0)
-        workers[id]["score"].append(30 / resp_time)
+    global workers
+    for w in workers.keys():
+        for idx, job in enumerate(workers[w]["load"]):
+            if job[0] == prompt_id:
+                job = workers[w]["load"].pop(idx)
+                p_start = job[1]
+                #record error
+                if iserror:
+                    workers[w]["error_cnt"] += 1
+                #track response time and score (based on 30 second response time)
+                #TODO: calculate score based on image size * batchsize requested
+                if rec_time > 0:
+                    if len(workers[w]["resp_time"]) == 10:
+                        workers[w]["resp_time"].pop(0)
+                    resp_time = rec_time - p_start
+                    workers[w]["resp_time"].append(resp_time)
+                    if len(workers[w]["score"]) == 10:
+                        workers[w]["score"].pop(0)
+                        workers[w]["score"].append(30 / resp_time)
+                return
+        
 
 def remove_worker(id):
     global workers
@@ -368,23 +410,35 @@ mw = threading.Timer(1, monitor_workers)
 mw.daemon = True
 def main(args):
     global config
+    #check that data dir exists and create if not
+    config["datadir"] = str(args.datadir)
+    try:
+        args.datadir.mkdir(parents=True, exist_ok=True)
+    except:
+        app.logger.warning("datadir does not exist and could not create. check permissions are correct. exiting.")
+        return
+    #set configs
     sdr.secret = args.secret
     sdr.verify_ssl = args.noselfsignedcert
+    sdr.setup_workers(args.maxsessions)
     config["managesecret"] = args.managesecret
+    config["maxsessions"] = args.maxsessions
     
     #store worker monitor
     mw.start()
     
     app.logger.info("orchestrator config set, starting node")
-    app.run(host=args.ipaddr, port=args.port)
+    app.run(host=args.ipaddr, port=args.port, threaded=True)
      
 if __name__=="__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--ipaddr", type=str, action="store", default="127.0.0.1")
     parser.add_argument("--port", type=str, action="store", default="5555")
     parser.add_argument("--secret", type=str, action="store", default="stablediffusion")
+    parser.add_argument("--datadir", type=lambda p: pathlib.Path(p).resolve(), default=pathlib.Path(__file__).resolve().parent / "odata")
     parser.add_argument("--noselfsignedcert", type=bool, action="store", default=False)
     parser.add_argument("--managesecret", type=str, action="store", default="manage")
+    parser.add_argument("--maxsessions", type=int, action="store", default=10)
     args = parser.parse_args()
     
     main(args)

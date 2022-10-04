@@ -1,25 +1,35 @@
-import requests
+import requests, logging
 from requests.models import Response
 from requests.packages.urllib3.exceptions import InsecureRequestWarning
+from requests_futures.sessions import FuturesSession
+from concurrent.futures import ThreadPoolExecutor
 from flask import make_response, send_file
 
 requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
+
+logging.basicConfig(format='%(asctime)s - %(levelname)s - %(module)s:%(lineno)d - %(message)s',level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 
 class InternalRequests:
     def __init__(self, secret="stablediffusion", verify_ssl=False):
         self.secret = secret
         self.verify_ssl = verify_ssl
         self.wrong_secret = requests.models.Response()
-        self.wrong_secret.status_code = 400
+        self.wrong_secret.status_code = 401
         self.wrong_secret._content = b'secret does not match'
         self.http_error = requests.models.Response()
         self.http_error.status_code = 404
         self.http_error._content = b'error'
-        
+        self.sessions = FuturesSession()
+    
+    def setup_workers(self, maxsessions=10):
+        self.sessions = FuturesSession(executor=ThreadPoolExecutor(max_workers=maxsessions))
+    
     def get(self, url="", params=None, data=None, headers={}):
         headers["Credentials"] = self.secret
         try:
-            resp = requests.get(url, params=params, data=data, headers=headers, verify=self.verify_ssl, timeout=90)
+            resp = requests.get(url, params=params, data=data, headers=headers, verify=self.verify_ssl)
             if self.match_response_secret(resp):
                 return resp
             else:
@@ -29,25 +39,31 @@ class InternalRequests:
         except requests.exceptions.ConnectionError as errc:
             return self.http_error
         except requests.exceptions.Timeout as errt:
-            return self.http_error
+           return self.http_error
         except requests.exceptions.RequestException as err:
             return self.http_error
         
-    def post(self, url="", params=None, data=None, headers={}, json={}):
+    def post(self, url="", params=None, data=None, headers={}, json={}, files=None):
         headers["Credentials"] = self.secret
         try:
-            resp = requests.post(url, params=params, data=data, headers=headers, json=json, verify=self.verify_ssl, timeout=90)
+            resp = requests.post(url, params=params, data=data, headers=headers, json=json, files=files, verify=self.verify_ssl)
+            logger.debug("response received")
             if self.match_response_secret(resp):
                 return resp
             else:
+                print(str(resp.text))
                 return self.wrong_secret
         except requests.exceptions.HTTPError as errh:
+            logger.error(errh)
             return self.http_error
         except requests.exceptions.ConnectionError as errc:
+            logger.error(errc)
             return self.http_error
         except requests.exceptions.Timeout as errt:
+            logger.error(errt)
             return self.http_error
         except requests.exceptions.RequestException as err:
+            logger.error(err)
             return self.http_error
         
     def send_file_with_secret(self, data, type="img/png", filename="", resp=None, addl_headers=None):
@@ -63,7 +79,7 @@ class InternalRequests:
                 resp.headers = {**resp.headers, **addl_headers}
             return resp
         
-    def make_response_with_secret(self, msg, status, resp=None, addl_headers=None):
+    def send_response_with_secret(self, msg, status, resp=None, addl_headers=None):
         if resp == None:
             resp_w_secret = make_response(msg, status)
             resp_w_secret.headers["Credentials"] = self.secret
