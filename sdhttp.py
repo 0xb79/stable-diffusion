@@ -1,7 +1,6 @@
 import requests, logging
 from requests.models import Response
 from requests.packages.urllib3.exceptions import InsecureRequestWarning
-from requests_futures.sessions import FuturesSession
 from concurrent.futures import ThreadPoolExecutor
 from flask import make_response, send_file
 
@@ -21,10 +20,6 @@ class InternalRequests:
         self.http_error = requests.models.Response()
         self.http_error.status_code = 404
         self.http_error._content = b'error'
-        self.sessions = FuturesSession()
-    
-    def setup_workers(self, maxsessions=10):
-        self.sessions = FuturesSession(executor=ThreadPoolExecutor(max_workers=maxsessions))
     
     def get(self, url="", params=None, data=None, headers={}):
         headers["Credentials"] = self.secret

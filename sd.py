@@ -102,8 +102,11 @@ class StableDiffusionProcessor:
         output = None
         error = ""
         try:
-            prompt = [prompt] * i_batchsize
+            prompt = [prompt] * batchsize
             if torch.cuda.is_available() and "cuda" in self.settings["device"]:
+                with torch.autocast("cuda"):
+                    output = self.i2i_pipe(prompt, init_image=init_img, strength=strength, guidance_scale=guidance, num_inference_steps=iterations, generator=generator)
+            else:
                 with torch.autocast("cuda"):
                     output = self.i2i_pipe(prompt, init_image=init_img, strength=strength, guidance_scale=guidance, num_inference_steps=iterations, generator=generator)
         except RuntimeError as re:
@@ -189,7 +192,7 @@ class StableDiffusionProcessor:
             model = "CompVis/stable-diffusion-v1-4" if self.settings["modelpath"] == "" else self.settings["modelpath"]
             if not self.settings["lowermem"]:
                 if t2i:
-                    print("loading txt2img")
+                    logger.info("loading txt2img")
                     self.t2i_pipe = StableDiffusionPipeline.from_pretrained(
                         model, 
                         scheduler = self.scheduler,
